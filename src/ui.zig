@@ -424,6 +424,30 @@ pub const UiContext = struct {
         return res;
     }
 
+    /// `str` if it fits in `max_w` on one line, otherwise its longest prefix
+    /// that fits followed by "…" (frame scratch memory). Cuts on a code point
+    /// boundary via DirectWrite hit testing, so it costs one cached layout.
+    pub fn ellipsize(self: *UiContext, str: []const u8, style: TextStyle, max_w: f32) []const u8 {
+        if (str.len == 0 or max_w <= 0) return str;
+        const full = self.renderer.measureText(str, style, 0);
+        if (full.x <= max_w) return str;
+        const dots = "…";
+        const dots_w = self.renderer.measureText(dots, style, 0).x;
+        const avail = max_w - dots_w;
+        if (avail <= 0) return dots;
+        var cut = self.renderer.caretFromPoint(str, style, 0, .{ .x = avail, .y = full.y * 0.5 });
+        cut = @min(cut, str.len);
+        // A hit in a character's trailing half lands after it: step back if
+        // that character crosses the edge.
+        if (cut > 0 and self.renderer.measureText(str[0..cut], style, 0).x > avail) {
+            cut -= 1;
+            while (cut > 0 and (str[cut] & 0xC0) == 0x80) cut -= 1;
+        }
+        while (cut > 0 and str[cut - 1] == ' ') cut -= 1;
+        if (cut == 0) return dots;
+        return self.fmt("{s}" ++ dots, .{str[0..cut]});
+    }
+
     // ---- Label helper (Dear ImGui ## convention) ----
 
     pub fn visibleLabel(lbl: []const u8) []const u8 {

@@ -63,6 +63,11 @@ pub fn fmt(comptime format: []const u8, args: anytype) [:0]const u8 {
     return ui.get().fmt(format, args);
 }
 
+/// One-line text shortened with "…" to fit `max_w` (see UiContext.ellipsize).
+pub fn ellipsize(str: []const u8, style: ui.TextStyle, max_w: f32) []const u8 {
+    return ui.get().ellipsize(str, style, max_w);
+}
+
 // Layout
 pub const Gap = layout.Gap;
 pub const CardOptions = layout.CardOptions;

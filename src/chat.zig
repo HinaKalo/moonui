@@ -63,10 +63,8 @@ pub fn conversation(id_str: [:0]const u8, o: ConversationOptions) bool {
     if (o.time.len > 0) {
         u.dl().text(v2(right_edge - time_w, r.min.y + 11), p.text_faint, o.time, time_style, 0);
     }
-    const name_clip = Rect.xywh(tx, r.min.y + 9, @max(right_edge - tx - time_w - 8, 20), 22);
-    u.dl().pushClip(name_clip);
-    u.dl().text(v2(tx, r.min.y + 10), p.text, o.name, name_style, 0);
-    u.dl().popClip();
+    const name_w = @max(right_edge - tx - time_w - 8, 20);
+    u.dl().text(v2(tx, r.min.y + 10), p.text, u.ellipsize(o.name, name_style, name_w), name_style, 0);
 
     // Bottom row: preview + unread badge
     var badge_w: f32 = 0;
@@ -82,10 +80,8 @@ pub fn conversation(id_str: [:0]const u8, o: ConversationOptions) bool {
         u.dl().text(v2(br.min.x + (badge_w - bts.x) * 0.5, br.min.y + (18 - bts.y) * 0.5), if (o.muted) p.text_muted else p.on_accent, bs, bstyle, 0);
     }
     const prev_style: TextStyle = .{ .size = t.type.label, .weight = .regular };
-    const prev_clip = Rect.xywh(tx, r.min.y + 32, @max(right_edge - tx - badge_w - 8, 20), 22);
-    u.dl().pushClip(prev_clip);
-    u.dl().text(v2(tx, r.min.y + 33), p.text_muted, o.preview, prev_style, 0);
-    u.dl().popClip();
+    const prev_w = @max(right_edge - tx - badge_w - 8, 20);
+    u.dl().text(v2(tx, r.min.y + 33), p.text_muted, u.ellipsize(o.preview, prev_style, prev_w), prev_style, 0);
 
     return hit.clicked;
 }
