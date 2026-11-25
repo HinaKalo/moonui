@@ -427,12 +427,6 @@ pub fn beginMain(o: MainOptions) void {
     u.main_view_rect = view_r;
     u.main_padding = o.padding;
 
-    // Handle mouse wheel scroll when pointer is in main area
-    if (u.input.mouse_wheel != 0 and !u.modal_active and view_r.contains(u.input.mouse_pos)) {
-        u.scroll_target_y = std.math.clamp(u.scroll_target_y - u.input.mouse_wheel * 48.0, 0, u.scroll_max_y);
-        u.anim.markActive();
-    }
-
     u.dl().pushClip(view_r);
 
     var inner_w = @max(view_w - o.padding * 2, 100);
@@ -461,6 +455,12 @@ pub fn beginMain(o: MainOptions) void {
 
 pub fn endMain() void {
     const u = ui.get();
+    // Mouse wheel (nested scroll areas consumed theirs already).
+    if (u.input.mouse_wheel != 0 and !u.modal_active and u.main_view_rect.contains(u.input.mouse_pos)) {
+        u.scroll_target_y = std.math.clamp(u.scroll_target_y - u.input.mouse_wheel * 48.0, 0, u.scroll_max_y);
+        u.input.mouse_wheel = 0;
+        u.anim.markActive();
+    }
     const b = u.popBox();
     const content_h = (b.max_y - u.main_content_start_y) + u.main_padding * 2;
     const view_h = u.main_view_rect.h();
@@ -479,6 +479,144 @@ pub fn endMain() void {
     }
 
     u.dl().popClip();
+}
+
+// ---- Scroll areas (independent vertical scrolling regions) ----
+
+pub const ScrollOptions = struct {
+    /// Inner padding on all sides.
+    padding: f32 = 0,
+    spacing_y: f32 = 10,
+    /// Keep following new content while scrolled to the bottom (chat timelines).
+    stick_to_bottom: bool = false,
+    /// Start at the bottom the first time this area is shown.
+    start_at_bottom: bool = false,
+    scrollbar: bool = true,
+};
+
+/// Begins a scroll area filling `rect`. Content is laid out top-down inside
+/// it; call `endScroll` after. Returns the persistent state (y, max, ...).
+pub fn beginScroll(id_str: []const u8, rect: Rect, o: ScrollOptions) *ui.ScrollState {
+    const u = ui.get();
+    const id = u.hashId(id_str);
+    const st = u.scrollState(id);
+    st.stick_bottom = o.stick_to_bottom;
+    if (!st.initialized) {
+        st.initialized = true;
+        if (o.start_at_bottom) st.pending_bottom = true;
+    }
+    st.view_h = rect.h();
+
+    // Smooth scrolling towards the target.
+    if (@abs(st.target - st.y) > 0.25) {
+        const k = if (u.theme.motion.enabled) 1.0 - @exp(-20.0 * u.anim.delta_time) else 1.0;
+        st.y += (st.target - st.y) * k;
+        u.anim.markActive();
+    } else {
+        st.y = st.target;
+    }
+
+    if (u.scroll_depth < u.scroll_stack.len) {
+        u.scroll_stack[u.scroll_depth] = .{
+            .id = id,
+            .rect = rect,
+            .origin_y = rect.min.y + o.padding - @round(st.y),
+            .padding = o.padding,
+            .scrollbar = o.scrollbar,
+        };
+        u.scroll_depth += 1;
+    }
+    u.dl().pushClip(rect);
+    u.pushId(id_str);
+    const sb_w: f32 = if (o.scrollbar) 10 else 0;
+    const origin_y = rect.min.y + o.padding - @round(st.y);
+    u.pushBox(.{
+        .origin_x = rect.min.x + o.padding,
+        .origin_y = origin_y,
+        .avail_w = @max(rect.w() - o.padding * 2 - sb_w, 10),
+        .cursor_x = rect.min.x + o.padding,
+        .cursor_y = origin_y,
+        .max_x = rect.min.x + o.padding,
+        .max_y = origin_y,
+        .spacing_x = 8,
+        .spacing_y = o.spacing_y,
+    });
+    return st;
+}
+
+pub fn endScroll() void {
+    const u = ui.get();
+    const b = u.popBox();
+    u.popId();
+    if (u.scroll_depth == 0) {
+        u.dl().popClip();
+        return;
+    }
+    u.scroll_depth -= 1;
+    const f = u.scroll_stack[u.scroll_depth];
+    const st = u.scrollState(f.id);
+    const view_h = f.rect.h();
+
+    const was_bottom = st.atBottom();
+    const prev_from_bottom = st.max - st.y;
+    st.content_h = @max(b.max_y - f.origin_y, 0) + f.padding * 2;
+    st.max = @max(st.content_h - view_h, 0);
+
+    if (st.keep_from_bottom) {
+        st.keep_from_bottom = false;
+        st.y = @max(st.max - st.from_bottom, 0);
+        st.target = st.y;
+    } else if (st.pending_bottom or (st.stick_bottom and was_bottom and prev_from_bottom <= 2.0)) {
+        st.pending_bottom = false;
+        st.target = st.max;
+        st.y = st.max;
+    }
+    st.target = std.math.clamp(st.target, 0, st.max);
+    st.y = std.math.clamp(st.y, 0, st.max);
+
+    // Mouse wheel (innermost area under the pointer wins).
+    if (u.input.mouse_wheel != 0 and !u.modal_active and f.rect.contains(u.input.mouse_pos)) {
+        st.target = std.math.clamp(st.target - u.input.mouse_wheel * 56.0, 0, st.max);
+        u.input.mouse_wheel = 0;
+        u.anim.markActive();
+    }
+
+    // Scrollbar with a draggable thumb.
+    if (f.scrollbar and st.max > 1.0) {
+        const track = Rect.xywh(f.rect.max.x - 9, f.rect.min.y + 6, 6, view_h - 12);
+        const thumb_h = @max(track.h() * (view_h / @max(st.content_h, 1)), 28);
+        const frac = st.y / st.max;
+        const thumb = Rect.xywh(track.min.x, track.min.y + (track.h() - thumb_h) * frac, 6, thumb_h);
+        const sid = f.id +% 0x5C201;
+        const hit = u.buttonBehavior(sid, thumb.expand(3), false);
+        if (hit.held) {
+            const rel = (u.input.mouse_pos.y - track.min.y - thumb_h * 0.5) / @max(track.h() - thumb_h, 1);
+            st.target = std.math.clamp(rel, 0, 1) * st.max;
+            st.y = st.target;
+        }
+        const hover_t = u.anim.toggle(sid, 1, hit.hovered or hit.held, u.theme.motion.fast);
+        u.dl().rectFilled(thumb, u.theme.palette.border_strong.withAlpha(0.55 + 0.35 * hover_t), 3);
+    }
+    u.dl().popClip();
+
+    // Advance the parent layout past the area.
+    const parent = u.box();
+    parent.max_y = @max(parent.max_y, f.rect.max.y);
+}
+
+/// Scrolls the area `id_str` to the bottom at the end of the next frame.
+pub fn scrollToBottom(id_str: []const u8) void {
+    const u = ui.get();
+    u.scrollState(u.hashId(id_str)).pending_bottom = true;
+}
+
+/// Call right before older items are inserted above the visible ones: the
+/// view keeps its distance from the bottom instead of jumping.
+pub fn keepScrollFromBottom(id_str: []const u8) void {
+    const u = ui.get();
+    const st = u.scrollState(u.hashId(id_str));
+    st.keep_from_bottom = true;
+    st.from_bottom = st.max - st.y;
 }
 
 pub fn pageHeader(title: []const u8, subtitle: ?[]const u8) void {

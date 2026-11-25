@@ -238,7 +238,7 @@ fn frame(s: *State) void {
         const prev_same = mi > 0 and conv.msgs[mi - 1].own == m.own and std.mem.eql(u8, conv.msgs[mi - 1].author, m.author);
         const next_same = mi + 1 < conv.msg_count and conv.msgs[mi + 1].own == m.own and std.mem.eql(u8, conv.msgs[mi + 1].author, m.author);
         const pos: ui.chat.GroupPos = if (!prev_same and !next_same) .single else if (!prev_same) .first else if (!next_same) .last else .middle;
-        ui.chat.message(ui.fmt("m-{d}-{d}", .{ s.selected, mi }), .{
+        _ = ui.chat.message(ui.fmt("m-{d}-{d}", .{ s.selected, mi }), .{
             .own = m.own,
             .author = m.author,
             .text = m.text(),
@@ -265,7 +265,7 @@ fn frame(s: *State) void {
         .max_x = pane_x + 20,
         .max_y = comp_y + 16,
     });
-    const ev = s.composer.draw("##composer", "Message (Enter to send)...");
+    const ev = s.composer.draw("##composer", .{ .hint = "Message (Enter to send, Shift+Enter for a new line)" });
     if (ev.attach) {
         ui.toast(.info, "Attachment", .{ .description = "Attach files via mooncore / Win32 dialogs." });
     }

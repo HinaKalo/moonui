@@ -7,6 +7,9 @@ const theme_mod = @import("theme.zig");
 const anim_mod = @import("anim.zig");
 const icons = @import("icons.zig");
 const layout = @import("layout.zig");
+const textedit = @import("textedit.zig");
+const clipboard = @import("clipboard.zig");
+const Renderer = @import("renderer.zig").Renderer;
 
 const Vec2 = math.Vec2;
 const Rect = math.Rect;
@@ -606,7 +609,8 @@ pub fn TextBuffer(comptime capacity: usize) type {
             return self;
         }
         pub fn set(self: *Self, s: []const u8) void {
-            const n = @min(s.len, capacity - 1);
+            var n = @min(s.len, capacity - 1);
+            while (n > 0 and n < s.len and (s[n] & 0xC0) == 0x80) n -= 1;
             @memcpy(self.buf[0..n], s[0..n]);
             self.buf[n] = 0;
         }
@@ -619,6 +623,172 @@ pub fn TextBuffer(comptime capacity: usize) type {
     };
 }
 
+const EditKeys = struct {
+    edited: bool = false,
+    submitted: bool = false,
+    moved_up: bool = false,
+    moved_down: bool = false,
+    page_up: bool = false,
+    page_down: bool = false,
+};
+
+/// Keyboard editing of the focused buffer (caret / selection live in the UiContext).
+fn handleEditKeys(u: *ui.UiContext, buf: []u8, len: *usize, multiline: bool, read_only: bool, secret: bool) EditKeys {
+    var r: EditKeys = .{};
+    const in = &u.input;
+    var sel = textedit.selection(u.caret_pos, u.sel_anchor);
+
+    if (in.shortcut_select_all) {
+        u.sel_anchor = 0;
+        u.caret_pos = len.*;
+        return r;
+    }
+    if ((in.shortcut_copy or in.shortcut_cut) and !sel.empty() and !secret) {
+        _ = clipboard.setText(buf[sel.lo..sel.hi]);
+    }
+    if (read_only) {
+        moveCaret(u, buf[0..len.*], multiline, &r);
+        return r;
+    }
+    if (in.shortcut_cut and !sel.empty() and !secret) {
+        len.* = textedit.deleteRange(buf, len.*, sel.lo, sel.hi);
+        u.caret_pos = sel.lo;
+        u.sel_anchor = sel.lo;
+        r.edited = true;
+        sel = textedit.selection(u.caret_pos, u.sel_anchor);
+    }
+    if (in.shortcut_paste) {
+        if (clipboard.getText(u.allocator)) |pasted| {
+            defer u.allocator.free(pasted);
+            const txt = if (multiline) clipboard.normalizeNewlines(pasted) else clipboard.singleLine(pasted);
+            replaceSelection(u, buf, len, txt);
+            r.edited = true;
+        }
+        sel = textedit.selection(u.caret_pos, u.sel_anchor);
+    }
+    const typed = in.typed();
+    if (typed.len > 0) {
+        replaceSelection(u, buf, len, typed);
+        r.edited = true;
+        sel = textedit.selection(u.caret_pos, u.sel_anchor);
+    }
+    if (in.key_backspace) {
+        if (!sel.empty()) {
+            len.* = textedit.deleteRange(buf, len.*, sel.lo, sel.hi);
+            u.caret_pos = sel.lo;
+        } else if (u.caret_pos > 0) {
+            const from = if (in.ctrl_down) textedit.prevWord(buf[0..len.*], u.caret_pos) else textedit.prevBoundary(buf[0..len.*], u.caret_pos);
+            len.* = textedit.deleteRange(buf, len.*, from, u.caret_pos);
+            u.caret_pos = from;
+        }
+        u.sel_anchor = u.caret_pos;
+        r.edited = true;
+    }
+    if (in.key_delete) {
+        if (!sel.empty()) {
+            len.* = textedit.deleteRange(buf, len.*, sel.lo, sel.hi);
+            u.caret_pos = sel.lo;
+        } else if (u.caret_pos < len.*) {
+            const to = if (in.ctrl_down) textedit.nextWord(buf[0..len.*], u.caret_pos) else textedit.nextBoundary(buf[0..len.*], u.caret_pos);
+            len.* = textedit.deleteRange(buf, len.*, u.caret_pos, to);
+        }
+        u.sel_anchor = u.caret_pos;
+        r.edited = true;
+    }
+    if (in.key_enter) {
+        if (multiline and (in.shift_down or in.ctrl_down)) {
+            replaceSelection(u, buf, len, "\n");
+            r.edited = true;
+        } else {
+            r.submitted = true;
+        }
+    }
+    moveCaret(u, buf[0..len.*], multiline, &r);
+    return r;
+}
+
+fn replaceSelection(u: *ui.UiContext, buf: []u8, len: *usize, txt: []const u8) void {
+    const sel = textedit.selection(u.caret_pos, u.sel_anchor);
+    if (!sel.empty()) {
+        len.* = textedit.deleteRange(buf, len.*, sel.lo, sel.hi);
+        u.caret_pos = sel.lo;
+    }
+    const n = textedit.insert(buf, len.*, u.caret_pos, txt);
+    len.* += n;
+    u.caret_pos += n;
+    u.sel_anchor = u.caret_pos;
+}
+
+fn moveCaret(u: *ui.UiContext, txt: []const u8, multiline: bool, r: *EditKeys) void {
+    const in = &u.input;
+    const sel = textedit.selection(u.caret_pos, u.sel_anchor);
+    var moved = false;
+    if (in.key_left) {
+        if (!in.shift_down and !sel.empty()) {
+            u.caret_pos = sel.lo;
+        } else if (in.ctrl_down) {
+            u.caret_pos = textedit.prevWord(txt, u.caret_pos);
+        } else {
+            u.caret_pos = textedit.prevBoundary(txt, u.caret_pos);
+        }
+        moved = true;
+    }
+    if (in.key_right) {
+        if (!in.shift_down and !sel.empty()) {
+            u.caret_pos = sel.hi;
+        } else if (in.ctrl_down) {
+            u.caret_pos = textedit.nextWord(txt, u.caret_pos);
+        } else {
+            u.caret_pos = textedit.nextBoundary(txt, u.caret_pos);
+        }
+        moved = true;
+    }
+    if (in.key_home) {
+        u.caret_pos = if (multiline and !in.ctrl_down) textedit.lineStart(txt, u.caret_pos) else 0;
+        moved = true;
+    }
+    if (in.key_end) {
+        u.caret_pos = if (multiline and !in.ctrl_down) textedit.lineEnd(txt, u.caret_pos) else txt.len;
+        moved = true;
+    }
+    if (multiline) {
+        r.moved_up = in.key_up;
+        r.moved_down = in.key_down;
+        r.page_up = in.key_page_up;
+        r.page_down = in.key_page_down;
+    }
+    if (moved and !in.shift_down) u.sel_anchor = u.caret_pos;
+}
+
+/// Byte offset of the `n`th code point of `s`.
+fn byteOfCodepoint(s: []const u8, n: usize) usize {
+    var i: usize = 0;
+    var k: usize = 0;
+    while (i < s.len and k < n) : (k += 1) i = textedit.nextBoundary(s, i);
+    return i;
+}
+
+fn codepointCount(s: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(s) catch s.len;
+}
+
+fn maskText(out: []u8, s: []const u8) []const u8 {
+    var mlen: usize = 0;
+    var idx: usize = 0;
+    while (idx < s.len and mlen + 3 <= out.len) {
+        idx = textedit.nextBoundary(s, idx);
+        // UTF-8 bullet '•' (E2 80 A2)
+        out[mlen] = 0xE2;
+        out[mlen + 1] = 0x80;
+        out[mlen + 2] = 0xA2;
+        mlen += 3;
+    }
+    return out[0..mlen];
+}
+
+/// Single-line text input: caret, mouse selection (drag / double-click /
+/// shift-click), clipboard (Ctrl+A/C/X/V), word jumps, horizontal scrolling
+/// and IME placement. Returns true when edited (or on Enter with `submit_on_enter`).
 pub fn textField(lbl: [:0]const u8, buf: []u8, o: InputOptions) bool {
     const u = ui.get();
     const t = &u.theme;
@@ -630,68 +800,55 @@ pub fn textField(lbl: [:0]const u8, buf: []u8, o: InputOptions) bool {
 
     const r = u.allocRect(v2(w, h));
     const id = u.hashId(lbl);
+    const style: TextStyle = .{ .size = textSizePx(o.size.textSize()), .weight = .regular };
+    const text_clip = Rect{ .min = v2(r.min.x + pad_x, r.min.y + 2), .max = v2(r.max.x - 10, r.max.y - 2) };
+    var len = std.mem.sliceTo(buf, 0).len;
+
+    var mask_buf: [768]u8 = undefined;
     const hovered = !o.disabled and u.canInteract(r);
     if (hovered) {
         u.hot_id = id;
         u.cursor_kind = .ibeam;
-        if (u.input.mouse_pressed) {
-            u.focused_id = id;
-            u.caret_id = id;
-            u.caret_pos = std.mem.sliceTo(buf, 0).len;
-        }
     }
-    const focused = !o.disabled and u.focused_id == id;
 
-    var len = std.mem.sliceTo(buf, 0).len;
+    var focused = !o.disabled and u.focused_id == id;
     if (focused and u.caret_id != id) {
         u.caret_id = id;
         u.caret_pos = len;
+        u.sel_anchor = len;
+        u.edit_scroll = 0;
     }
     if (u.caret_pos > len) u.caret_pos = len;
+    if (u.sel_anchor > len) u.sel_anchor = len;
+
+    // Mouse: place caret, drag-select, double-click selects a word.
+    const scroll_x = if (focused) u.edit_scroll else 0;
+    const origin_x = text_clip.min.x - scroll_x;
+    if (hovered and u.input.mouse_pressed) {
+        const was_focused = focused;
+        u.focused_id = id;
+        u.active_id = id;
+        u.caret_id = id;
+        focused = true;
+        if (!was_focused) u.edit_scroll = 0;
+        const pos = caretFromMouse(u, buf[0..len], style, o.password, &mask_buf, u.input.mouse_pos.x - origin_x);
+        if (u.input.mouse_double_clicked and !o.password) {
+            u.sel_anchor = textedit.prevWord(buf[0..len], pos);
+            u.caret_pos = textedit.nextWord(buf[0..len], pos);
+        } else {
+            u.caret_pos = pos;
+            if (!u.input.shift_down or !was_focused) u.sel_anchor = pos;
+        }
+    } else if (focused and u.active_id == id and u.input.mouse_down and !u.input.mouse_pressed) {
+        u.caret_pos = caretFromMouse(u, buf[0..len], style, o.password, &mask_buf, u.input.mouse_pos.x - origin_x);
+    }
 
     var edited = false;
     var submitted = false;
-    if (focused and !o.read_only) {
-        const typed = u.input.typed();
-        if (typed.len > 0 and len + typed.len < buf.len) {
-            // Insert at caret_pos
-            std.mem.copyBackwards(u8, buf[u.caret_pos + typed.len .. len + typed.len], buf[u.caret_pos..len]);
-            @memcpy(buf[u.caret_pos .. u.caret_pos + typed.len], typed);
-            len += typed.len;
-            buf[len] = 0;
-            u.caret_pos += typed.len;
-            edited = true;
-        }
-        if (u.input.key_backspace and u.caret_pos > 0) {
-            var prev = u.caret_pos - 1;
-            while (prev > 0 and (buf[prev] & 0xC0) == 0x80) prev -= 1;
-            const removed = u.caret_pos - prev;
-            std.mem.copyForwards(u8, buf[prev .. len - removed], buf[u.caret_pos..len]);
-            len -= removed;
-            buf[len] = 0;
-            u.caret_pos = prev;
-            edited = true;
-        }
-        if (u.input.key_delete and u.caret_pos < len) {
-            const seq = std.unicode.utf8ByteSequenceLength(buf[u.caret_pos]) catch 1;
-            const end = @min(u.caret_pos + seq, len);
-            const removed = end - u.caret_pos;
-            std.mem.copyForwards(u8, buf[u.caret_pos .. len - removed], buf[end..len]);
-            len -= removed;
-            buf[len] = 0;
-            edited = true;
-        }
-        if (u.input.key_left and u.caret_pos > 0) {
-            u.caret_pos -= 1;
-            while (u.caret_pos > 0 and (buf[u.caret_pos] & 0xC0) == 0x80) u.caret_pos -= 1;
-        }
-        if (u.input.key_right and u.caret_pos < len) {
-            const seq = std.unicode.utf8ByteSequenceLength(buf[u.caret_pos]) catch 1;
-            u.caret_pos = @min(u.caret_pos + seq, len);
-        }
-        if (u.input.key_home) u.caret_pos = 0;
-        if (u.input.key_end) u.caret_pos = len;
-        if (u.input.key_enter) submitted = true;
+    if (focused) {
+        const keys = handleEditKeys(u, buf, &len, false, o.read_only, o.password);
+        edited = keys.edited;
+        submitted = keys.submitted;
     }
 
     const hover_t = u.anim.toggle(id, 1, hovered, t.motion.fast);
@@ -709,47 +866,236 @@ pub fn textField(lbl: [:0]const u8, buf: []u8, o: InputOptions) bool {
         icons.draw(u.dl(), ic, v2(r.min.x + 12 + isz * 0.5, r.center().y), isz, Color.mix(p.text_faint, p.accent, focus_t));
     }
 
-    const style: TextStyle = .{ .size = textSizePx(o.size.textSize()), .weight = .regular };
-    const text_clip = Rect{ .min = v2(r.min.x + pad_x, r.min.y + 2), .max = v2(r.max.x - 10, r.max.y - 2) };
-    u.dl().pushClip(text_clip);
+    const shown: []const u8 = if (len == 0) o.hint else if (o.password) maskText(&mask_buf, buf[0..len]) else buf[0..len];
+    const line_h = u.renderer.measureText("A", style, 0).y;
+    const ty = r.center().y - line_h * 0.5;
 
-    var mask_buf: [256]u8 = undefined;
-    const shown: []const u8 = if (len == 0)
-        o.hint
-    else if (o.password) blk: {
-        var mlen: usize = 0;
-        var idx: usize = 0;
-        while (idx < len and mlen + 3 <= mask_buf.len) {
-            const step = std.unicode.utf8ByteSequenceLength(buf[idx]) catch 1;
-            idx += step;
-            // UTF-8 bullet '•' (E2 80 A2)
-            mask_buf[mlen] = 0xE2;
-            mask_buf[mlen + 1] = 0x80;
-            mask_buf[mlen + 2] = 0xA2;
-            mlen += 3;
-        }
-        break :blk mask_buf[0..mlen];
-    } else buf[0..len];
-
-    const ts = u.renderer.measureText(if (shown.len > 0) shown else "A", style, 0);
-    const ty = r.center().y - ts.y * 0.5;
-    if (shown.len > 0) {
-        u.dl().text(v2(text_clip.min.x, ty), if (len == 0) p.text_faint else p.text, shown, style, 0);
-    }
-
+    // Keep the caret inside the visible part of the field.
+    const vis_w = text_clip.w();
     if (focused) {
+        const caret_x = displayX(u, buf[0..len], style, o.password, &mask_buf, u.caret_pos);
+        if (caret_x - u.edit_scroll > vis_w - 2) u.edit_scroll = caret_x - vis_w + 2;
+        if (caret_x - u.edit_scroll < 0) u.edit_scroll = caret_x;
+        const full_w = if (len > 0) u.renderer.measureText(shown, style, 0).x else 0;
+        if (full_w - u.edit_scroll < vis_w - 2) u.edit_scroll = @max(full_w - vis_w + 2, 0);
+    }
+    const x0 = text_clip.min.x - (if (focused) u.edit_scroll else 0);
+
+    u.dl().pushClip(text_clip);
+    if (focused and u.caret_pos != u.sel_anchor and len > 0) {
+        const sel = textedit.selection(u.caret_pos, u.sel_anchor);
+        const sx = displayX(u, buf[0..len], style, o.password, &mask_buf, sel.lo);
+        const ex = displayX(u, buf[0..len], style, o.password, &mask_buf, sel.hi);
+        u.dl().rectFilled(Rect.xywh(x0 + sx, ty, ex - sx, line_h), p.accent.withAlpha(0.30), 2);
+    }
+    if (shown.len > 0) {
+        u.dl().text(v2(x0, ty), if (len == 0) p.text_faint else p.text, shown, style, 0);
+    }
+    if (focused) {
+        const cx = x0 + displayX(u, buf[0..len], style, o.password, &mask_buf, u.caret_pos);
+        u.ime_caret = Rect.xywh(cx, ty, 1, line_h);
         const blink = @mod(u.anim.time, 1.0) < 0.55;
-        if (blink) {
-            const prefix = if (o.password) shown else buf[0..u.caret_pos];
-            const cw = if (prefix.len > 0) u.renderer.measureText(prefix, style, 0).x else 0;
-            const cx = text_clip.min.x + cw;
-            u.dl().line(v2(cx, r.min.y + 7), v2(cx, r.max.y - 7), p.accent, 1.5);
-        }
+        if (blink) u.dl().line(v2(cx, r.min.y + 7), v2(cx, r.max.y - 7), p.accent, 1.5);
         u.anim.keepAlive(0.6);
     }
     u.dl().popClip();
 
     return if (o.submit_on_enter) submitted else edited;
+}
+
+/// X offset (from the text origin) of byte offset `byte` as displayed (masked for passwords).
+fn displayX(u: *ui.UiContext, txt: []const u8, style: TextStyle, password: bool, mask_buf: []u8, byte: usize) f32 {
+    if (byte == 0 or txt.len == 0) return 0;
+    if (password) {
+        const shown = maskText(mask_buf, txt);
+        const n = codepointCount(txt[0..@min(byte, txt.len)]);
+        return u.renderer.caretAt(shown, style, 0, @min(n * 3, shown.len)).pos.x;
+    }
+    return u.renderer.caretAt(txt, style, 0, byte).pos.x;
+}
+
+fn caretFromMouse(u: *ui.UiContext, txt: []const u8, style: TextStyle, password: bool, mask_buf: []u8, x: f32) usize {
+    if (txt.len == 0) return 0;
+    if (password) {
+        const shown = maskText(mask_buf, txt);
+        const mpos = u.renderer.caretFromPoint(shown, style, 0, v2(x, 2));
+        return byteOfCodepoint(txt, mpos / 3);
+    }
+    return u.renderer.caretFromPoint(txt, style, 0, v2(x, 2));
+}
+
+pub const TextAreaOptions = struct {
+    hint: [:0]const u8 = "",
+    width: Width = .fill,
+    min_lines: u32 = 1,
+    max_lines: u32 = 6,
+    /// Enter submits (Shift/Ctrl+Enter inserts a line break). false: Enter inserts.
+    submit_on_enter: bool = true,
+    disabled: bool = false,
+    read_only: bool = false,
+    /// Draw the field chrome (border + background).
+    chrome: bool = true,
+    size: TextSize = .body,
+};
+
+pub const TextAreaResult = struct {
+    edited: bool = false,
+    submitted: bool = false,
+    focused: bool = false,
+    height: f32 = 0,
+};
+
+/// Multi-line, word-wrapping text editor that grows from `min_lines` to
+/// `max_lines` and scrolls beyond that. Used for chat composers.
+pub fn textArea(lbl: [:0]const u8, buf: []u8, o: TextAreaOptions) TextAreaResult {
+    const u = ui.get();
+    const t = &u.theme;
+    const p = &t.palette;
+    const style: TextStyle = .{ .size = textSizePx(o.size), .weight = .regular, .wrap = true };
+    const pad_x: f32 = 12;
+    const pad_y: f32 = 8;
+    const w = o.width.resolve(240);
+    const inner_w = @max(w - pad_x * 2, 20);
+    const line_h = u.renderer.measureText("A", style, 0).y;
+    const id = u.hashId(lbl);
+
+    var len = std.mem.sliceTo(buf, 0).len;
+    var focused = !o.disabled and u.focused_id == id;
+    if (focused and u.caret_id != id) {
+        u.caret_id = id;
+        u.caret_pos = len;
+        u.sel_anchor = len;
+        u.edit_scroll = 0;
+    }
+    if (u.caret_pos > len) u.caret_pos = len;
+    if (u.sel_anchor > len) u.sel_anchor = len;
+
+    var res: TextAreaResult = .{};
+    if (focused) {
+        const keys = handleEditKeys(u, buf, &len, true, o.read_only, false);
+        res.edited = keys.edited;
+        res.submitted = keys.submitted and o.submit_on_enter;
+        if (keys.submitted and !o.submit_on_enter and !o.read_only) {
+            replaceSelection(u, buf, &len, "\n");
+            res.edited = true;
+        }
+        if (keys.moved_up or keys.moved_down or keys.page_up or keys.page_down) {
+            const c = caretPos(u, buf[0..len], style, inner_w, u.caret_pos, line_h);
+            const dy: f32 = if (keys.moved_up) -line_h else if (keys.moved_down) line_h else if (keys.page_up) -line_h * 5 else line_h * 5;
+            const ty = c.pos.y + line_h * 0.5 + dy;
+            if (ty < 0) {
+                u.caret_pos = 0;
+            } else {
+                u.caret_pos = u.renderer.caretFromPoint(buf[0..len], style, inner_w, v2(c.pos.x, ty));
+            }
+            if (!u.input.shift_down) u.sel_anchor = u.caret_pos;
+        }
+    }
+
+    // Size: content height clamped to [min_lines, max_lines].
+    const txt = buf[0..len];
+    // DirectWrite counts the empty line after a trailing '\n' in the height.
+    const content_h = if (len > 0) u.renderer.measureText(txt, style, inner_w).y else line_h;
+    const min_h = line_h * @as(f32, @floatFromInt(@max(o.min_lines, 1)));
+    const max_h = line_h * @as(f32, @floatFromInt(@max(o.max_lines, o.min_lines)));
+    const view_h = std.math.clamp(content_h, min_h, max_h);
+    const r = u.allocRect(v2(w, view_h + pad_y * 2));
+    res.height = r.h();
+    const view = Rect{ .min = v2(r.min.x + pad_x, r.min.y + pad_y), .max = v2(r.max.x - pad_x, r.max.y - pad_y) };
+
+    const hovered = !o.disabled and u.canInteract(r);
+    if (hovered) {
+        u.hot_id = id;
+        u.cursor_kind = .ibeam;
+    }
+
+    // Mouse.
+    const scroll_now = if (focused) u.edit_scroll else 0;
+    if (hovered and u.input.mouse_pressed) {
+        const was_focused = focused;
+        u.focused_id = id;
+        u.active_id = id;
+        u.caret_id = id;
+        focused = true;
+        if (!was_focused) u.edit_scroll = 0;
+        const pt = v2(u.input.mouse_pos.x - view.min.x, u.input.mouse_pos.y - view.min.y + scroll_now);
+        const pos = u.renderer.caretFromPoint(txt, style, inner_w, pt);
+        if (u.input.mouse_double_clicked) {
+            u.sel_anchor = textedit.prevWord(txt, pos);
+            u.caret_pos = textedit.nextWord(txt, pos);
+        } else {
+            u.caret_pos = pos;
+            if (!u.input.shift_down or !was_focused) u.sel_anchor = pos;
+        }
+    } else if (focused and u.active_id == id and u.input.mouse_down and !u.input.mouse_pressed) {
+        const pt = v2(u.input.mouse_pos.x - view.min.x, u.input.mouse_pos.y - view.min.y + scroll_now);
+        u.caret_pos = u.renderer.caretFromPoint(txt, style, inner_w, pt);
+    }
+    if (hovered and u.input.mouse_wheel != 0 and content_h > view_h) {
+        if (focused) u.edit_scroll = std.math.clamp(u.edit_scroll - u.input.mouse_wheel * line_h * 2, 0, content_h - view_h);
+        u.input.mouse_wheel = 0;
+    }
+    res.focused = focused;
+
+    // Keep the caret visible.
+    const caret = caretPos(u, txt, style, inner_w, u.caret_pos, line_h);
+    if (focused) {
+        if (caret.pos.y + caret.height - u.edit_scroll > view_h) u.edit_scroll = caret.pos.y + caret.height - view_h;
+        if (caret.pos.y - u.edit_scroll < 0) u.edit_scroll = caret.pos.y;
+        u.edit_scroll = std.math.clamp(u.edit_scroll, 0, @max(content_h - view_h, 0));
+    }
+    const scroll = if (focused) u.edit_scroll else 0;
+
+    const hover_t = u.anim.toggle(id, 1, hovered, t.motion.fast);
+    const focus_t = u.anim.toggle(id, 3, focused, t.motion.normal);
+    const rounding = t.radius.md;
+    if (o.chrome) {
+        if (focus_t > 0.01) u.dl().rectStroke(r.expand(2.5), p.accent.withAlpha(0.22 * focus_t), rounding + 2.5, 3.0);
+        u.dl().rectFilled(r, p.surface, rounding);
+        u.dl().rectStroke(r, Color.mix(Color.mix(p.border, p.border_strong, hover_t), p.accent, focus_t), rounding, 1);
+    }
+
+    u.dl().pushClip(view.expand(1));
+    const origin = v2(view.min.x, view.min.y - scroll);
+    if (focused and u.caret_pos != u.sel_anchor and len > 0) {
+        const sel = textedit.selection(u.caret_pos, u.sel_anchor);
+        const a = caretPos(u, txt, style, inner_w, sel.lo, line_h);
+        const b = caretPos(u, txt, style, inner_w, sel.hi, line_h);
+        const col = p.accent.withAlpha(0.30);
+        if (@abs(a.pos.y - b.pos.y) < 1) {
+            u.dl().rectFilled(Rect.xywh(origin.x + a.pos.x, origin.y + a.pos.y, b.pos.x - a.pos.x, a.height), col, 2);
+        } else {
+            u.dl().rectFilled(Rect.xywh(origin.x + a.pos.x, origin.y + a.pos.y, inner_w - a.pos.x, a.height), col, 2);
+            const mid_top = a.pos.y + a.height;
+            if (b.pos.y - mid_top > 1) u.dl().rectFilled(Rect.xywh(origin.x, origin.y + mid_top, inner_w, b.pos.y - mid_top), col, 2);
+            u.dl().rectFilled(Rect.xywh(origin.x, origin.y + b.pos.y, b.pos.x, b.height), col, 2);
+        }
+    }
+    if (len > 0) {
+        u.dl().text(origin, p.text, txt, style, inner_w + 1);
+    } else if (o.hint.len > 0) {
+        u.dl().text(origin, p.text_faint, o.hint, .{ .size = style.size, .weight = .regular }, 0);
+    }
+    if (focused) {
+        const cx = origin.x + caret.pos.x;
+        const cy = origin.y + caret.pos.y;
+        u.ime_caret = Rect.xywh(cx, cy, 1, caret.height);
+        if (@mod(u.anim.time, 1.0) < 0.55) u.dl().line(v2(cx, cy + 2), v2(cx, cy + caret.height - 2), p.accent, 1.5);
+        u.anim.keepAlive(0.6);
+    }
+    u.dl().popClip();
+    return res;
+}
+
+/// Caret position inside a wrapped layout, including after a trailing newline
+/// (which DirectWrite reports at the end of the previous line).
+fn caretPos(u: *ui.UiContext, txt: []const u8, style: TextStyle, wrap_w: f32, byte: usize, line_h: f32) Renderer.Caret {
+    if (txt.len > 0 and byte == txt.len and txt[txt.len - 1] == '\n') {
+        const prev = u.renderer.caretAt(txt, style, wrap_w, txt.len - 1);
+        return .{ .pos = v2(0, prev.pos.y + prev.height), .height = prev.height };
+    }
+    const c = u.renderer.caretAt(txt, style, wrap_w, byte);
+    return .{ .pos = c.pos, .height = if (c.height > 0) c.height else line_h };
 }
 
 // =====================================================================
@@ -985,7 +1331,7 @@ pub fn progressIndeterminate(o: ProgressOptions) void {
     const t = &u.theme;
     const w = o.width.resolve(160);
     const r = u.allocRect(v2(w, o.height));
-    if (!r.intersects(u.main_view_rect)) return;
+    if (u.isCulled(r) or (u.scroll_depth == 0 and u.main_view_rect.w() > 0 and !r.intersects(u.main_view_rect))) return;
     u.dl().rectFilled(r, t.palette.border, o.height * 0.5);
     const phase = u.anim.loop(1.4);
     const seg = w * 0.35;
@@ -995,7 +1341,7 @@ pub fn progressIndeterminate(o: ProgressOptions) void {
     u.dl().popClip();
 }
 
-fn spinnerAt(dl: *DrawList, center: Vec2, radius: f32, col: Color) void {
+pub fn spinnerAt(dl: *DrawList, center: Vec2, radius: f32, col: Color) void {
     const phase = ui.get().anim.loop(0.9);
     const a0 = phase * std.math.tau;
     const sweep = std.math.pi * (0.6 + 0.4 * @sin(phase * std.math.tau));
@@ -1012,7 +1358,7 @@ pub const SpinnerOptions = struct {
 pub fn spinner(o: SpinnerOptions) void {
     const u = ui.get();
     const r = u.allocRect(v2(o.size, o.size));
-    if (!r.intersects(u.main_view_rect)) return;
+    if (u.isCulled(r) or (u.scroll_depth == 0 and u.main_view_rect.w() > 0 and !r.intersects(u.main_view_rect))) return;
     spinnerAt(u.dl(), r.center(), o.size * 0.42, u.theme.tone(o.tone));
 }
 
@@ -1168,8 +1514,28 @@ pub fn openMenu(id_str: [:0]const u8) void {
     u.popup_anchor = u.box().last_rect;
 }
 
+/// Opens the menu `id_str` below `anchor` (e.g. a 1x1 rect at the mouse for context menus).
+pub fn openMenuAt(id_str: [:0]const u8, anchor: Rect) void {
+    const u = ui.get();
+    u.open_popup_id = u.hashId(id_str);
+    u.popup_anchor = anchor;
+    u.anim.markActive();
+}
+
+pub fn isMenuOpen(id_str: [:0]const u8) bool {
+    const u = ui.get();
+    return u.open_popup_id == u.hashId(id_str);
+}
+
+pub fn closeMenu() void {
+    ui.get().open_popup_id = 0;
+}
+
 var menu_origin: Vec2 = v2(0, 0);
 var menu_cmd_index: usize = 0;
+/// Height of the last drawn menu (used to flip menus that would leave the window).
+var menu_last_h: f32 = 0;
+const menu_w: f32 = 200;
 
 pub fn beginMenu(id_str: [:0]const u8) bool {
     const u = ui.get();
@@ -1177,7 +1543,11 @@ pub fn beginMenu(id_str: [:0]const u8) bool {
     if (u.open_popup_id != id) return false;
 
     u.using_overlay = true;
-    menu_origin = v2(u.popup_anchor.min.x, u.popup_anchor.max.y + 4);
+    var ox = u.popup_anchor.min.x;
+    var oy = u.popup_anchor.max.y + 4;
+    if (ox + menu_w > u.viewport.x - 8) ox = @max(u.viewport.x - menu_w - 8, 8);
+    if (menu_last_h > 0 and oy + menu_last_h > u.viewport.y - 8) oy = @max(u.popup_anchor.min.y - 4 - menu_last_h, 8);
+    menu_origin = v2(ox, oy);
     menu_cmd_index = u.dl().cmds.items.len;
     u.pushBox(.{
         .origin_x = menu_origin.x + 6,
@@ -1247,8 +1617,10 @@ pub fn menuSeparator() void {
 pub fn endMenu() void {
     const u = ui.get();
     const b = u.popBox();
-    const w: f32 = 200;
+    const w: f32 = menu_w;
     const h = (b.max_y - menu_origin.y) + 6;
+    if (@abs(h - menu_last_h) > 0.5) u.anim.markActive();
+    menu_last_h = h;
     const pop_r = Rect.xywh(menu_origin.x, menu_origin.y, w, h);
     u.popup_rect = pop_r;
     u.popup_drawn = true;

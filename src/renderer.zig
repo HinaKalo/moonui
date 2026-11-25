@@ -23,6 +23,102 @@ const FontKey = struct {
     wrap: bool,
 };
 
+/// Cache key of a shaped text layout: string hash + length + font + wrap width.
+const LayoutKey = struct {
+    hash: u64,
+    len: u32,
+    font: FontKey,
+    max_w_q: u32,
+};
+
+const LayoutEntry = struct {
+    layout: *dwrite.IDWriteTextLayout,
+    last_frame: u64,
+};
+
+/// Layouts unused for this many frames are released once the cache is large.
+const layout_ttl_frames: u64 = 240;
+const layout_soft_cap: usize = 3000;
+
+/// Converts UTF-8 to UTF-16 in a stack buffer, falling back to the heap for long text.
+const Utf16Scratch = struct {
+    stack: [1024]u16 = undefined,
+    heap: ?[]u16 = null,
+
+    fn convert(self: *Utf16Scratch, allocator: std.mem.Allocator, str: []const u8) []const u16 {
+        if (str.len <= self.stack.len) {
+            const n = std.unicode.utf8ToUtf16Le(&self.stack, str) catch return lossy(&self.stack, str);
+            return self.stack[0..n];
+        }
+        const buf = allocator.alloc(u16, str.len) catch return lossy(&self.stack, str[0..self.stack.len]);
+        self.heap = buf;
+        const n = std.unicode.utf8ToUtf16Le(buf, str) catch return lossy(buf, str);
+        return buf[0..n];
+    }
+
+    /// Invalid UTF-8 (e.g. a truncated server string): replace bad bytes with U+FFFD.
+    fn lossy(buf: []u16, str: []const u8) []const u16 {
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < str.len and n < buf.len) {
+            const seq = std.unicode.utf8ByteSequenceLength(str[i]) catch {
+                buf[n] = 0xFFFD;
+                n += 1;
+                i += 1;
+                continue;
+            };
+            if (i + seq > str.len) {
+                buf[n] = 0xFFFD;
+                n += 1;
+                break;
+            }
+            const cp = std.unicode.utf8Decode(str[i .. i + seq]) catch 0xFFFD;
+            if (cp >= 0x10000) {
+                if (n + 2 > buf.len) break;
+                const v = cp - 0x10000;
+                buf[n] = @intCast(0xD800 + (v >> 10));
+                buf[n + 1] = @intCast(0xDC00 + (v & 0x3FF));
+                n += 2;
+            } else {
+                buf[n] = @intCast(cp);
+                n += 1;
+            }
+            i += seq;
+        }
+        return buf[0..n];
+    }
+
+    fn deinit(self: *Utf16Scratch, allocator: std.mem.Allocator) void {
+        if (self.heap) |h| allocator.free(h);
+        self.heap = null;
+    }
+};
+
+/// UTF-16 index of the UTF-8 byte offset `byte` in `str`.
+pub fn utf16IndexOf(str: []const u8, byte: usize) u32 {
+    var i: usize = 0;
+    var units: u32 = 0;
+    const end = @min(byte, str.len);
+    while (i < end) {
+        const seq = std.unicode.utf8ByteSequenceLength(str[i]) catch 1;
+        units += if (seq == 4) 2 else 1;
+        i += seq;
+    }
+    return units;
+}
+
+/// UTF-8 byte offset of the UTF-16 index `index` in `str` (clamped to a code point boundary).
+pub fn byteOffsetOf(str: []const u8, index: u32) usize {
+    var i: usize = 0;
+    var units: u32 = 0;
+    while (i < str.len and units < index) {
+        const seq = std.unicode.utf8ByteSequenceLength(str[i]) catch 1;
+        units += if (seq == 4) 2 else 1;
+        i = @min(i + seq, str.len);
+    }
+    return i;
+}
+
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
     d3d_device: ?*d3d.ID3D11Device = null,
@@ -43,19 +139,32 @@ pub const Renderer = struct {
 
     dwrite_factory: ?*dwrite.IDWriteFactory = null,
     font_cache: std.AutoHashMap(FontKey, *dwrite.IDWriteTextFormat),
+    layout_cache: std.AutoHashMap(LayoutKey, LayoutEntry),
+    frame_index: u64 = 0,
+
+    /// UI font family and locale. The locale drives DirectWrite's fallback for
+    /// scripts the family lacks ("zh-cn" picks Microsoft YaHei for Han text).
+    font_family: [64]u16 = undefined,
+    font_locale: [24]u16 = undefined,
 
     pixel_w: u32 = 1,
     pixel_h: u32 = 1,
     dpi: f32 = 96.0,
 
+    pub const default_font_family = "Segoe UI";
+    pub const default_font_locale = "zh-cn";
+
     pub fn init(allocator: std.mem.Allocator, hwnd: win32.HWND, width: u32, height: u32, dpi: f32) !Renderer {
         var self: Renderer = .{
             .allocator = allocator,
             .font_cache = std.AutoHashMap(FontKey, *dwrite.IDWriteTextFormat).init(allocator),
+            .layout_cache = std.AutoHashMap(LayoutKey, LayoutEntry).init(allocator),
             .pixel_w = @max(width, 1),
             .pixel_h = @max(height, 1),
             .dpi = dpi,
         };
+        _ = win32.utf8ToUtf16Z(&self.font_family, default_font_family);
+        _ = win32.utf8ToUtf16Z(&self.font_locale, default_font_locale);
         errdefer self.deinit();
 
         // 1. Direct3D 11 device with BGRA support for Direct2D interop
@@ -137,12 +246,9 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(self: *Renderer) void {
-        var it = self.font_cache.valueIterator();
-        while (it.next()) |v| {
-            var p: ?*dwrite.IDWriteTextFormat = v.*;
-            com.safeRelease(&p);
-        }
+        self.clearTextCaches();
         self.font_cache.deinit();
+        self.layout_cache.deinit();
 
         if (self.dc) |dc| dc.setTarget(null);
         com.safeRelease(&self.target_bitmap);
@@ -207,13 +313,39 @@ pub const Renderer = struct {
         };
     }
 
-    fn getTextFormat(self: *Renderer, style: TextStyle) ?*dwrite.IDWriteTextFormat {
-        const key: FontKey = .{
+    /// Sets the UI font family and fallback locale (e.g. "Segoe UI", "zh-cn").
+    pub fn setFont(self: *Renderer, family: []const u8, locale: []const u8) void {
+        _ = win32.utf8ToUtf16Z(&self.font_family, family);
+        _ = win32.utf8ToUtf16Z(&self.font_locale, locale);
+        self.clearTextCaches();
+    }
+
+    fn clearTextCaches(self: *Renderer) void {
+        var lit = self.layout_cache.valueIterator();
+        while (lit.next()) |e| {
+            var l: ?*dwrite.IDWriteTextLayout = e.layout;
+            com.safeRelease(&l);
+        }
+        self.layout_cache.clearRetainingCapacity();
+        var it = self.font_cache.valueIterator();
+        while (it.next()) |v| {
+            var p: ?*dwrite.IDWriteTextFormat = v.*;
+            com.safeRelease(&p);
+        }
+        self.font_cache.clearRetainingCapacity();
+    }
+
+    fn fontKey(style: TextStyle) FontKey {
+        return .{
             .size_tenths = @intFromFloat(@round(std.math.clamp(style.size, 6.0, 200.0) * 10.0)),
             .weight = @intFromEnum(style.weight),
             .mono = style.mono,
             .wrap = style.wrap,
         };
+    }
+
+    fn getTextFormat(self: *Renderer, style: TextStyle) ?*dwrite.IDWriteTextFormat {
+        const key = fontKey(style);
         if (self.font_cache.get(key)) |fmt| return fmt;
 
         const dw_weight: u32 = switch (style.weight) {
@@ -222,13 +354,12 @@ pub const Renderer = struct {
             .semibold => dwrite.DWRITE_FONT_WEIGHT_SEMIBOLD,
             .bold => dwrite.DWRITE_FONT_WEIGHT_BOLD,
         };
-        const family = if (style.mono)
+        const family: [*:0]const u16 = if (style.mono)
             std.unicode.utf8ToUtf16LeStringLiteral("Consolas")
         else
-            std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
-        const locale = std.unicode.utf8ToUtf16LeStringLiteral("en-us");
+            @ptrCast(&self.font_family);
 
-        const fmt = self.dwrite_factory.?.createTextFormat(family, dw_weight, style.size, locale) orelse return null;
+        const fmt = self.dwrite_factory.?.createTextFormat(family, dw_weight, style.size, @ptrCast(&self.font_locale)) orelse return null;
         fmt.setWordWrapping(if (style.wrap) dwrite.DWRITE_WORD_WRAPPING_WRAP else dwrite.DWRITE_WORD_WRAPPING_NO_WRAP);
         fmt.setTextAlignment(dwrite.DWRITE_TEXT_ALIGNMENT_LEADING);
         fmt.setParagraphAlignment(dwrite.DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -236,24 +367,67 @@ pub const Renderer = struct {
         return fmt;
     }
 
-    pub fn measureText(self: *Renderer, str: []const u8, style: TextStyle, max_w: f32) Vec2 {
-        if (str.len == 0) return .{ .x = 0, .y = style.size * 1.32 };
-        const fmt = self.getTextFormat(style) orelse return .{ .x = @as(f32, @floatFromInt(str.len)) * style.size * 0.55, .y = style.size * 1.32 };
-
-        var utf16_stack: [1024]u16 = undefined;
-        const len = std.unicode.utf8ToUtf16Le(&utf16_stack, str) catch blk: {
-            break :blk @min(str.len, utf16_stack.len);
+    /// Shaped layout for `str`, cached across frames (shaping CJK text and
+    /// wrapping long messages is the dominant per-frame cost in a chat view).
+    /// The cache owns the returned layout; do not release it.
+    pub fn layoutFor(self: *Renderer, str: []const u8, style: TextStyle, max_w: f32) ?*dwrite.IDWriteTextLayout {
+        const font = fontKey(style);
+        const wrap_w: f32 = if (max_w > 0) max_w else 100000.0;
+        const key: LayoutKey = .{
+            .hash = std.hash.Wyhash.hash(0x6d6f6f6e, str),
+            .len = @intCast(@min(str.len, std.math.maxInt(u32))),
+            .font = font,
+            .max_w_q = @intFromFloat(@round(std.math.clamp(wrap_w, 0, 1.0e6) * 4.0)),
         };
-        const layout = self.dwrite_factory.?.createTextLayout(
-            utf16_stack[0..len],
-            fmt,
-            if (max_w > 0) max_w else 100000.0,
-            100000.0,
-        ) orelse return .{ .x = 0, .y = style.size * 1.32 };
-        defer {
+        if (self.layout_cache.getPtr(key)) |e| {
+            e.last_frame = self.frame_index;
+            return e.layout;
+        }
+        const fmt = self.getTextFormat(style) orelse return null;
+        var scratch: Utf16Scratch = .{};
+        defer scratch.deinit(self.allocator);
+        const wide = scratch.convert(self.allocator, str);
+        const layout = self.dwrite_factory.?.createTextLayout(wide, fmt, wrap_w, 100000.0) orelse return null;
+        self.layout_cache.put(key, .{ .layout = layout, .last_frame = self.frame_index }) catch {
+            // Cache full / OOM: hand out an uncached layout that is released next frame.
             var l: ?*dwrite.IDWriteTextLayout = layout;
             com.safeRelease(&l);
+            return null;
+        };
+        return layout;
+    }
+
+    /// Releases layouts that have not been used for a while (called once per frame).
+    fn trimLayoutCache(self: *Renderer) void {
+        if (self.layout_cache.count() < layout_soft_cap) return;
+        var stale: [256]LayoutKey = undefined;
+        while (true) {
+            var n: usize = 0;
+            var it = self.layout_cache.iterator();
+            while (it.next()) |kv| {
+                if (self.frame_index - kv.value_ptr.last_frame > layout_ttl_frames) {
+                    stale[n] = kv.key_ptr.*;
+                    n += 1;
+                    if (n == stale.len) break;
+                }
+            }
+            for (stale[0..n]) |k| {
+                if (self.layout_cache.fetchRemove(k)) |kv| {
+                    var l: ?*dwrite.IDWriteTextLayout = kv.value.layout;
+                    com.safeRelease(&l);
+                }
+            }
+            if (n < stale.len) break;
         }
+    }
+
+    pub fn layoutCacheSize(self: *const Renderer) usize {
+        return self.layout_cache.count();
+    }
+
+    pub fn measureText(self: *Renderer, str: []const u8, style: TextStyle, max_w: f32) Vec2 {
+        if (str.len == 0) return .{ .x = 0, .y = style.size * 1.32 };
+        const layout = self.layoutFor(str, style, max_w) orelse return .{ .x = @as(f32, @floatFromInt(str.len)) * style.size * 0.55, .y = style.size * 1.32 };
         const m = layout.getMetrics();
         return .{
             .x = m.widthIncludingTrailingWhitespace,
@@ -261,7 +435,28 @@ pub const Renderer = struct {
         };
     }
 
+    /// Byte offset in `str` of the caret position nearest to the layout-relative point.
+    pub fn caretFromPoint(self: *Renderer, str: []const u8, style: TextStyle, max_w: f32, pt: Vec2) usize {
+        if (str.len == 0) return 0;
+        const layout = self.layoutFor(str, style, max_w) orelse return str.len;
+        const hit = layout.hitTestPoint(pt.x, pt.y);
+        return byteOffsetOf(str, hit.index);
+    }
+
+    pub const Caret = struct { pos: Vec2, height: f32 };
+
+    /// Layout-relative caret position before byte offset `byte` (handles wrapped lines).
+    pub fn caretAt(self: *Renderer, str: []const u8, style: TextStyle, max_w: f32, byte: usize) Caret {
+        const line_h = style.size * 1.32;
+        if (str.len == 0) return .{ .pos = .{ .x = 0, .y = 0 }, .height = line_h };
+        const layout = self.layoutFor(str, style, max_w) orelse return .{ .pos = .{ .x = 0, .y = 0 }, .height = line_h };
+        const c = layout.hitTestTextPosition(utf16IndexOf(str, byte));
+        return .{ .pos = .{ .x = c.x, .y = c.y }, .height = if (c.height > 0) c.height else line_h };
+    }
+
     pub fn render(self: *Renderer, bg: Color, main_dl: *const DrawList, overlay_dl: *const DrawList, vsync: bool) void {
+        self.frame_index +%= 1;
+        defer self.trimLayoutCache();
         const dc = self.dc orelse return;
         dc.beginDraw();
         dc.setTransform(.{});
@@ -479,19 +674,7 @@ pub const Renderer = struct {
     }
 
     fn drawTextCmd(self: *Renderer, pos: Vec2, max_w: f32, col: Color, style: TextStyle, str: []const u8) void {
-        const fmt = self.getTextFormat(style) orelse return;
-        var utf16_stack: [1024]u16 = undefined;
-        const len = std.unicode.utf8ToUtf16Le(&utf16_stack, str) catch return;
-        const layout = self.dwrite_factory.?.createTextLayout(
-            utf16_stack[0..len],
-            fmt,
-            if (max_w > 0) max_w else 100000.0,
-            100000.0,
-        ) orelse return;
-        defer {
-            var l: ?*dwrite.IDWriteTextLayout = layout;
-            com.safeRelease(&l);
-        }
+        const layout = self.layoutFor(str, style, max_w) orelse return;
         self.solid_brush.?.setColor(col.d2dColor());
         self.dc.?.drawTextLayout(pos.d2dPt(), layout, self.solid_brush.?.asBrush());
     }
@@ -591,4 +774,23 @@ fn writeFileWin32(path: []const u8, data: []const u8) bool {
     defer _ = CloseHandle(h);
     var written: u32 = 0;
     return WriteFile(h, data.ptr, @intCast(data.len), &written, null) != 0 and written == data.len;
+}
+
+test "utf16 index mapping" {
+    const s = "a中😀b";
+    // a=1 unit, 中=1 unit, 😀=2 units (surrogate pair), b=1
+    try std.testing.expectEqual(@as(u32, 0), utf16IndexOf(s, 0));
+    try std.testing.expectEqual(@as(u32, 1), utf16IndexOf(s, 1));
+    try std.testing.expectEqual(@as(u32, 2), utf16IndexOf(s, 4));
+    try std.testing.expectEqual(@as(u32, 4), utf16IndexOf(s, 8));
+    try std.testing.expectEqual(@as(usize, 4), byteOffsetOf(s, 2));
+    try std.testing.expectEqual(@as(usize, 8), byteOffsetOf(s, 4));
+    try std.testing.expectEqual(s.len, byteOffsetOf(s, 99));
+}
+
+test "lossy utf16 conversion" {
+    var buf: [16]u16 = undefined;
+    const out = Utf16Scratch.lossy(&buf, "a\xffb");
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expectEqual(@as(u16, 0xFFFD), out[1]);
 }

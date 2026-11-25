@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
             "dcomp",
             "ole32",
             "imm32",
+            "shell32",
+            "kernel32",
         };
         for (libs) |lib| {
             moonui.linkSystemLibrary(lib, .{});

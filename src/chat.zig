@@ -35,6 +35,8 @@ pub fn conversation(id_str: [:0]const u8, o: ConversationOptions) bool {
     const r = u.allocRect(v2(u.availW(), h));
     const id = u.hashId(id_str);
     const hit = u.buttonBehavior(id, r, false);
+    // Off-screen rows in a scroll area only reserve their space.
+    if (u.isCulled(r)) return hit.clicked;
     const hover_t = u.anim.toggle(id, 1, hit.hovered, t.motion.fast);
     const sel_t = u.anim.toggle(id, 12, o.selected, t.motion.normal);
 
@@ -115,6 +117,13 @@ pub const Message = struct {
     quote_author: ?[]const u8 = null,
     quote_text: ?[]const u8 = null,
     status: MsgStatus = .none,
+    /// Shows `edited_label` next to the time.
+    edited: bool = false,
+    edited_label: []const u8 = "edited",
+    /// Muted italic-style body (placeholders such as "[Encrypted message]").
+    placeholder: bool = false,
+    /// Accent outline (search hit / jump target).
+    highlight: bool = false,
 };
 
 pub const MessageOptions = struct {
@@ -123,8 +132,16 @@ pub const MessageOptions = struct {
     max_width_ratio: f32 = 0.68,
 };
 
-pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
-    _ = id_str;
+pub const MessageEvent = struct {
+    clicked: bool = false,
+    right_clicked: bool = false,
+    double_clicked: bool = false,
+    hovered: bool = false,
+    /// Screen rect of the bubble (anchor for context menus).
+    bubble: Rect = .{ .min = v2(0, 0), .max = v2(0, 0) },
+};
+
+pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) MessageEvent {
     const u = ui.get();
     const t = &u.theme;
     const p = &t.palette;
@@ -142,7 +159,9 @@ pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
     const meta_style: TextStyle = .{ .size = t.type.caption - 1, .weight = .regular };
 
     const text_sz = u.renderer.measureText(msg.text, body_style, max_bubble_w - pad_x * 2);
-    const meta_w = if (msg.time.len > 0) u.renderer.measureText(msg.time, meta_style, 0).x + (if (msg.own and msg.status != .none) @as(f32, 16) else 0) else 0;
+    const edited_label = msg.edited_label;
+    const edited_w: f32 = if (msg.edited) u.renderer.measureText(edited_label, meta_style, 0).x + 6 else 0;
+    const meta_w = if (msg.time.len > 0) u.renderer.measureText(msg.time, meta_style, 0).x + edited_w + (if (msg.own and msg.status != .none) @as(f32, 16) else 0) else 0;
 
     var quote_h: f32 = 0;
     var quote_w: f32 = 0;
@@ -168,6 +187,19 @@ pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
     else
         row.min.x + av_s + av_gap;
     const by = row.min.y + name_h;
+    const br = Rect.xywh(bx, by, bubble_w, bubble_h);
+
+    var ev: MessageEvent = .{ .bubble = br };
+    // Off-screen rows in a scroll area only reserve their space.
+    if (u.isCulled(row)) return ev;
+
+    const id = u.hashId(id_str);
+    const hit = u.buttonBehavior(id, br, false);
+    if (hit.hovered) u.cursor_kind = .arrow;
+    ev.hovered = hit.hovered;
+    ev.clicked = hit.clicked;
+    ev.double_clicked = hit.hovered and u.input.mouse_double_clicked;
+    ev.right_clicked = u.input.mouse_right_pressed and u.canInteract(br);
 
     if (show_av) {
         drawAvatarAt(u, Rect.xywh(row.min.x, by, av_s, av_s), msg.author, null);
@@ -176,14 +208,15 @@ pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
         u.dl().text(v2(bx + 2, row.min.y), p.text_muted, msg.author, .{ .size = t.type.caption, .weight = .semibold }, 0);
     }
 
-    const br = Rect.xywh(bx, by, bubble_w, bubble_h);
     const rounding = t.radius.lg;
+    const hover_t = u.anim.toggle(id, 1, hit.hovered, t.motion.fast);
     if (msg.own) {
-        u.dl().gradient(br, p.accent.lighten(0.05), p.accent.darken(0.06), rounding, false);
+        u.dl().gradient(br, p.accent.lighten(0.05 + 0.04 * hover_t), p.accent.darken(0.06), rounding, false);
     } else {
-        u.dl().rectFilled(br, p.surface, rounding);
+        u.dl().rectFilled(br, Color.mix(p.surface, p.surface_raised, hover_t * 0.6), rounding);
         u.dl().rectStroke(br, p.border, rounding, 1);
     }
+    if (msg.highlight) u.dl().rectStroke(br.expand(2), p.warning, rounding + 2, 2);
 
     var cy = br.min.y + pad_y;
     const fg = if (msg.own) p.on_accent else p.text;
@@ -202,13 +235,14 @@ pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
         cy += quote_h;
     }
 
-    u.dl().text(v2(br.min.x + pad_x, cy), fg, msg.text, body_style, inner_w + 1);
+    u.dl().text(v2(br.min.x + pad_x, cy), if (msg.placeholder) fg_muted else fg, msg.text, body_style, inner_w + 1);
 
     if (msg.time.len > 0) {
         const my = br.max.y - 18;
         const tw = u.renderer.measureText(msg.time, meta_style, 0).x;
         const mx = br.max.x - pad_x - tw - (if (msg.own and msg.status != .none) @as(f32, 16) else 0);
         u.dl().text(v2(mx, my), fg_muted, msg.time, meta_style, 0);
+        if (msg.edited) u.dl().text(v2(mx - edited_w, my), fg_muted, edited_label, meta_style, 0);
         if (msg.own and msg.status != .none) {
             const ic: icons.Icon = switch (msg.status) {
                 .sending => .refresh,
@@ -220,6 +254,7 @@ pub fn message(id_str: [:0]const u8, msg: Message, o: MessageOptions) void {
             icons.draw(u.dl(), ic, v2(br.max.x - pad_x - 6, my + 7), 12, sc);
         }
     }
+    return ev;
 }
 
 pub fn searchBox(id_str: [:0]const u8, buf: []u8, hint: [:0]const u8) bool {
@@ -233,6 +268,19 @@ pub fn searchBox(id_str: [:0]const u8, buf: []u8, hint: [:0]const u8) bool {
 pub const ComposerEvent = struct {
     send: bool = false,
     attach: bool = false,
+    /// The text changed this frame (typing indicators, drafts).
+    edited: bool = false,
+    /// Height the composer row used (it grows with multi-line drafts).
+    height: f32 = 0,
+};
+
+pub const ComposerOptions = struct {
+    hint: [:0]const u8 = "Message",
+    send_label: [:0]const u8 = "Send",
+    attach_tooltip: ?[:0]const u8 = "Attach file",
+    show_attach: bool = true,
+    max_lines: u32 = 6,
+    disabled: bool = false,
 };
 
 pub fn Composer(comptime capacity: usize) type {
@@ -243,41 +291,85 @@ pub fn Composer(comptime capacity: usize) type {
         pub fn text(self: *const Self) []const u8 {
             return self.buf.slice();
         }
+        /// The draft without leading/trailing whitespace (what gets sent).
+        pub fn trimmed(self: *const Self) []const u8 {
+            return std.mem.trim(u8, self.buf.slice(), " \t\r\n");
+        }
         pub fn clear(self: *Self) void {
             self.buf.clear();
         }
+        pub fn set(self: *Self, s: []const u8) void {
+            self.buf.set(s);
+        }
 
-        pub fn draw(self: *Self, id_str: [:0]const u8, hint: [:0]const u8) ComposerEvent {
+        /// Multi-line composer: Enter sends, Shift+Enter inserts a line break.
+        pub fn draw(self: *Self, id_str: [:0]const u8, o: ComposerOptions) ComposerEvent {
             const u = ui.get();
             const avail = u.availW();
             const send_w: f32 = 84;
-            const attach_w: f32 = 34;
+            const attach_w: f32 = if (o.show_attach) 34 else 0;
             const gap: f32 = 8;
-            const input_w = @max(avail - send_w - attach_w - gap * 2, 120);
+            const input_w = @max(avail - send_w - attach_w - gap * (if (o.show_attach) @as(f32, 2) else 1), 120);
+            const ctrl_h = widgets.ControlSize.md.height();
 
             var ev: ComposerEvent = .{};
-            if (widgets.iconButton("##attach", .plus, .{ .variant = .outline, .tooltip = "Attach file" })) {
-                ev.attach = true;
-            }
-            u.placeSameLine(gap);
-            if (widgets.textField(id_str, &self.buf.buf, .{
-                .hint = hint,
+            const start_y = u.box().cursor_y;
+            ui.get().pushBox(.{
+                .origin_x = u.box().origin_x,
+                .origin_y = start_y,
+                .avail_w = avail,
+                .cursor_x = u.box().origin_x,
+                .cursor_y = start_y,
+                .max_x = u.box().origin_x,
+                .max_y = start_y,
+            });
+            const row_top = start_y;
+
+            // Measure the editor first so the buttons can align to its bottom.
+            const x0 = u.box().origin_x;
+            u.box().cursor_x = x0 + attach_w + (if (o.show_attach) gap else 0);
+            u.box().same_line = true;
+            u.box().row_y = row_top;
+            const res = widgets.textArea(id_str, &self.buf.buf, .{
+                .hint = o.hint,
                 .width = .{ .px = input_w },
-                .submit_on_enter = true,
-            })) {
-                if (self.buf.slice().len > 0) ev.send = true;
+                .max_lines = o.max_lines,
+                .disabled = o.disabled,
+            });
+            ev.edited = res.edited;
+            if (res.submitted and self.trimmed().len > 0) ev.send = true;
+            const editor_h = res.height;
+            const btn_y = row_top + editor_h - ctrl_h;
+
+            if (o.show_attach) {
+                u.box().cursor_x = x0;
+                u.box().same_line = true;
+                u.box().row_y = btn_y;
+                if (widgets.iconButton("##attach", .plus, .{ .variant = .outline, .tooltip = o.attach_tooltip, .disabled = o.disabled })) {
+                    ev.attach = true;
+                }
             }
-            u.placeSameLine(gap);
-            if (widgets.button("Send", .{
+            u.box().cursor_x = x0 + avail - send_w;
+            u.box().same_line = true;
+            u.box().row_y = btn_y;
+            if (widgets.button(o.send_label, .{
                 .variant = .primary,
                 .width = .{ .px = send_w },
-                .disabled = self.buf.slice().len == 0,
+                .disabled = o.disabled or self.trimmed().len == 0,
             })) {
                 ev.send = true;
             }
+            _ = u.popBox();
+            ev.height = editor_h;
+            _ = u.allocRect(v2(avail, editor_h));
             return ev;
         }
     };
+}
+
+/// Paints a name-initials avatar into `r` (no layout allocation).
+pub fn avatarAt(r: Rect, name: []const u8, status: ?ui.Tone) void {
+    drawAvatarAt(ui.get(), r, name, status);
 }
 
 fn drawAvatarAt(u: *ui.UiContext, r: Rect, name: []const u8, status: ?ui.Tone) void {

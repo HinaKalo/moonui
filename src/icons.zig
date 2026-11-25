@@ -1,4 +1,4 @@
-//! All 56 vector stroke icons from MoonWin on a 24x24 design grid,
+//! All 58 vector stroke icons from MoonWin on a 24x24 design grid,
 //! rendered as crisp Direct2D path geometries with round caps & joins.
 const std = @import("std");
 const math = @import("math.zig");
@@ -67,6 +67,8 @@ pub const Icon = enum {
     pause,
     cpu,
     globe,
+    message,
+    send,
 };
 
 const Pen = struct {
@@ -425,6 +427,14 @@ pub fn drawEx(dl: *DrawList, icon: Icon, center: Vec2, size: f32, col: Color, st
                 pen.line(2.5, q, 6, q);
                 pen.line(18, q, 21.5, q);
             }
+        },
+        .message => {
+            pen.rrect(3.5, 4.5, 17, 12.5, 3.5);
+            pen.poly(&.{ .{ 7.5, 17 }, .{ 7.5, 20.5 }, .{ 11.5, 17 } }, false);
+        },
+        .send => {
+            pen.poly(&.{ .{ 3.5, 11 }, .{ 20.5, 3.5 }, .{ 13.5, 20.5 }, .{ 11, 13 } }, true);
+            pen.line(11, 13, 20.5, 3.5);
         },
         .globe => {
             pen.circle(12, 12, 9);

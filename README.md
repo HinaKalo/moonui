@@ -40,3 +40,11 @@ zig build run -- --page components --theme 1    # Specific page & theme (0..3)
 zig build chat                                  # Native Direct2D IM demo (moonui + mooncore + moonchat)
 zig build new -- ..\my-app --name my-app        # Scaffold a new app
 ```
+
+## Building blocks for real apps
+
+- **Text**: DirectWrite layouts are cached across frames (long chat timelines stay cheap); `AppOptions.font_family` / `font_locale` pick the UI font and fallback (`"zh-cn"` → Microsoft YaHei for Han text). No length limit on drawn text.
+- **Scroll areas**: `beginScroll(id, rect, .{ .stick_to_bottom = true })` / `endScroll()`, with `scrollToBottom(id)` and `keepScrollFromBottom(id)` (call before prepending older items). Off-screen chat rows are culled.
+- **Text editing**: `textField` supports selection (mouse drag, double-click, Shift+arrows), Ctrl+A/C/X/V, word jumps and horizontal scrolling; `textArea` is a growing multi-line editor (Enter submits, Shift+Enter breaks). The IME candidate window follows the caret.
+- **Menus**: `openMenuAt(id, rect)` for context menus at the cursor (clamped to the window); `chat.message` returns click / right-click / double-click events.
+- **Window helpers**: `activate`, `flash`, `isForeground`, `setTitle`, `AppOptions.icon_resource`, `AppOptions.on_close`; `clipboard.getText` / `setText` / `openUrl`.

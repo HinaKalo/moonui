@@ -40,9 +40,18 @@ pub const InputState = struct {
     key_home: bool = false,
     key_end: bool = false,
     key_tab: bool = false,
+    key_page_up: bool = false,
+    key_page_down: bool = false,
     ctrl_down: bool = false,
     shift_down: bool = false,
-    typed_buf: [128]u8 = undefined,
+    /// Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A this frame.
+    shortcut_copy: bool = false,
+    shortcut_cut: bool = false,
+    shortcut_paste: bool = false,
+    shortcut_select_all: bool = false,
+    mouse_right_pressed: bool = false,
+    mouse_double_clicked: bool = false,
+    typed_buf: [512]u8 = undefined,
     typed_len: usize = 0,
 
     pub fn pushUtf8(self: *InputState, bytes: []const u8) void {
@@ -71,8 +80,49 @@ pub const InputState = struct {
         self.key_home = false;
         self.key_end = false;
         self.key_tab = false;
+        self.key_page_up = false;
+        self.key_page_down = false;
+        self.shortcut_copy = false;
+        self.shortcut_cut = false;
+        self.shortcut_paste = false;
+        self.shortcut_select_all = false;
+        self.mouse_right_pressed = false;
+        self.mouse_double_clicked = false;
         self.typed_len = 0;
     }
+};
+
+/// Persistent state of one scroll area (keyed by its id).
+pub const ScrollState = struct {
+    y: f32 = 0,
+    target: f32 = 0,
+    max: f32 = 0,
+    view_h: f32 = 0,
+    content_h: f32 = 0,
+    /// Follow new content while the view sits at the bottom (chat timelines).
+    stick_bottom: bool = false,
+    /// One-shot: jump to the bottom at the end of the next frame.
+    pending_bottom: bool = false,
+    /// One-shot: keep the distance from the bottom across a content change
+    /// (call before prepending older items so the view does not jump).
+    keep_from_bottom: bool = false,
+    from_bottom: f32 = 0,
+    initialized: bool = false,
+
+    pub fn atBottom(s: *const ScrollState) bool {
+        return s.max - s.target <= 2.0;
+    }
+    pub fn nearTop(s: *const ScrollState, px: f32) bool {
+        return s.max > 0 and s.y <= px;
+    }
+};
+
+pub const ScrollFrame = struct {
+    id: u64,
+    rect: Rect,
+    origin_y: f32,
+    padding: f32,
+    scrollbar: bool,
 };
 
 pub const Stats = struct {
@@ -169,9 +219,20 @@ pub const UiContext = struct {
     popup_rect: Rect = .{ .min = v2(0, 0), .max = v2(0, 0) },
     popup_drawn: bool = false,
 
-    // Text editing caret (byte offset in active TextBuffer)
+    // Text editing caret (byte offset in active TextBuffer). `sel_anchor`
+    // is the other end of the selection (== caret_pos: nothing selected).
     caret_pos: usize = 0,
+    sel_anchor: usize = 0,
     caret_id: u64 = 0,
+    /// Horizontal (single-line) / vertical (multi-line) scroll of the focused editor.
+    edit_scroll: f32 = 0,
+    /// Caret rectangle of the focused editor this frame (IME window placement).
+    ime_caret: ?Rect = null,
+
+    // Scroll areas
+    scrolls: std.AutoHashMap(u64, ScrollState),
+    scroll_stack: [8]ScrollFrame = undefined,
+    scroll_depth: usize = 0,
 
     // Main area scroll
     sidebar_w: f32 = 0,
@@ -211,6 +272,7 @@ pub const UiContext = struct {
             .main_dl = DrawList.init(allocator),
             .overlay_dl = DrawList.init(allocator),
             .anim = anim_mod.AnimStore.init(allocator),
+            .scrolls = std.AutoHashMap(u64, ScrollState).init(allocator),
         };
     }
 
@@ -218,6 +280,32 @@ pub const UiContext = struct {
         self.main_dl.deinit();
         self.overlay_dl.deinit();
         self.anim.deinit();
+        self.scrolls.deinit();
+    }
+
+    /// Persistent scroll state for `id` (created on first use).
+    pub fn scrollState(self: *UiContext, id: u64) *ScrollState {
+        const gop = self.scrolls.getOrPut(id) catch {
+            // OOM: share a throwaway state so callers never see null.
+            const S = struct {
+                var fallback: ScrollState = .{};
+            };
+            return &S.fallback;
+        };
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        return gop.value_ptr;
+    }
+
+    /// Visible region of the innermost scroll area (for culling off-screen items).
+    pub fn cullRect(self: *const UiContext) ?Rect {
+        if (self.scroll_depth == 0) return null;
+        return self.scroll_stack[self.scroll_depth - 1].rect;
+    }
+
+    /// True when `r` is entirely outside the innermost scroll area.
+    pub fn isCulled(self: *const UiContext, r: Rect) bool {
+        const c = self.cullRect() orelse return false;
+        return r.max.y < c.min.y or r.min.y > c.max.y;
     }
 
     pub fn dl(self: *UiContext) *DrawList {
@@ -242,6 +330,8 @@ pub const UiContext = struct {
         self.row_depth = 0;
         self.grid_depth = 0;
         self.card_depth = 0;
+        self.scroll_depth = 0;
+        self.ime_caret = null;
 
         // Smooth scroll interpolation
         if (@abs(self.scroll_target_y - self.scroll_y) > 0.25) {

@@ -14,6 +14,8 @@ pub const layout = @import("layout.zig");
 pub const widgets = @import("widgets.zig");
 pub const chat = @import("chat.zig");
 pub const app = @import("app.zig");
+pub const clipboard = @import("clipboard.zig");
+pub const textedit = @import("textedit.zig");
 
 // Core types
 pub const Vec2 = math.Vec2;
@@ -32,6 +34,12 @@ pub const AppOptions = app.AppOptions;
 pub const run = app.run;
 pub const wake = app.wake;
 pub const quit = app.quit;
+pub const window = app.window;
+pub const activate = app.activate;
+pub const isForeground = app.isForeground;
+pub const flash = app.flash;
+pub const setTitle = app.setTitle;
+pub const ScrollState = ui.ScrollState;
 
 pub fn setTheme(t: Theme) void {
     const u = ui.get();
@@ -88,6 +96,11 @@ pub const pageHeader = layout.pageHeader;
 pub const section = layout.section;
 pub const field = layout.field;
 pub const fieldHint = layout.fieldHint;
+pub const ScrollOptions = layout.ScrollOptions;
+pub const beginScroll = layout.beginScroll;
+pub const endScroll = layout.endScroll;
+pub const scrollToBottom = layout.scrollToBottom;
+pub const keepScrollFromBottom = layout.keepScrollFromBottom;
 
 // Widgets
 pub const TextSize = widgets.TextSize;
@@ -132,6 +145,9 @@ pub const radioGroup = widgets.radioGroup;
 pub const slider = widgets.slider;
 pub const sliderInt = widgets.sliderInt;
 pub const textField = widgets.textField;
+pub const TextAreaOptions = widgets.TextAreaOptions;
+pub const TextAreaResult = widgets.TextAreaResult;
+pub const textArea = widgets.textArea;
 pub const segmented = widgets.segmented;
 pub const tabs = widgets.tabs;
 pub const select = widgets.select;
@@ -147,6 +163,9 @@ pub const sparkline = widgets.sparkline;
 pub const stat = widgets.stat;
 pub const toast = widgets.toast;
 pub const openMenu = widgets.openMenu;
+pub const openMenuAt = widgets.openMenuAt;
+pub const isMenuOpen = widgets.isMenuOpen;
+pub const closeMenu = widgets.closeMenu;
 pub const beginMenu = widgets.beginMenu;
 pub const menuLabel = widgets.menuLabel;
 pub const menuItem = widgets.menuItem;
@@ -162,4 +181,7 @@ test {
     _ = color;
     _ = theme_mod;
     _ = anim;
+    _ = clipboard;
+    _ = textedit;
+    _ = renderer;
 }

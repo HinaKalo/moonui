@@ -63,6 +63,18 @@ pub const IDWriteTextFormat = extern struct {
     }
 };
 
+pub const DWRITE_HIT_TEST_METRICS = extern struct {
+    textPosition: u32 = 0,
+    length: u32 = 0,
+    left: f32 = 0,
+    top: f32 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
+    bidiLevel: u32 = 0,
+    isText: i32 = 0,
+    isTrimmed: i32 = 0,
+};
+
 pub const IDWriteTextLayout = extern struct {
     vtbl: *const VTable,
 
@@ -74,12 +86,45 @@ pub const IDWriteTextLayout = extern struct {
         _layout_pre: [32]*const anyopaque,
         // 60
         GetMetrics: *const fn (*IDWriteTextLayout, *DWRITE_TEXT_METRICS) callconv(.winapi) HRESULT,
+        GetOverhangMetrics: *const anyopaque, // 61
+        GetClusterMetrics: *const anyopaque, // 62
+        DetermineMinWidth: *const anyopaque, // 63
+        // 64
+        HitTestPoint: *const fn (*IDWriteTextLayout, f32, f32, *i32, *i32, *DWRITE_HIT_TEST_METRICS) callconv(.winapi) HRESULT,
+        // 65
+        HitTestTextPosition: *const fn (*IDWriteTextLayout, u32, i32, *f32, *f32, *DWRITE_HIT_TEST_METRICS) callconv(.winapi) HRESULT,
     };
 
     pub fn getMetrics(self: *IDWriteTextLayout) DWRITE_TEXT_METRICS {
         var m: DWRITE_TEXT_METRICS = .{};
         _ = self.vtbl.GetMetrics(self, &m);
         return m;
+    }
+
+    pub const PointHit = struct {
+        /// UTF-16 index of the caret position closest to the point.
+        index: u32,
+        inside: bool,
+    };
+
+    /// Caret position (UTF-16 index) nearest to a layout-relative point.
+    pub fn hitTestPoint(self: *IDWriteTextLayout, x: f32, y: f32) PointHit {
+        var trailing: i32 = 0;
+        var inside: i32 = 0;
+        var m: DWRITE_HIT_TEST_METRICS = .{};
+        if (com.failed(self.vtbl.HitTestPoint(self, x, y, &trailing, &inside, &m))) return .{ .index = 0, .inside = false };
+        return .{ .index = m.textPosition + (if (trailing != 0) m.length else 0), .inside = inside != 0 };
+    }
+
+    pub const CaretPos = struct { x: f32, y: f32, height: f32 };
+
+    /// Layout-relative caret position before the UTF-16 index `pos`.
+    pub fn hitTestTextPosition(self: *IDWriteTextLayout, pos: u32) CaretPos {
+        var x: f32 = 0;
+        var y: f32 = 0;
+        var m: DWRITE_HIT_TEST_METRICS = .{};
+        if (com.failed(self.vtbl.HitTestTextPosition(self, pos, 0, &x, &y, &m))) return .{ .x = 0, .y = 0, .height = 0 };
+        return .{ .x = x, .y = y, .height = m.height };
     }
 };
 

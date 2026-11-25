@@ -221,6 +221,64 @@ pub extern "dwmapi" fn DwmSetWindowAttribute(hwnd: HWND, dwAttribute: DWORD, pvA
 pub const SWP_NOZORDER: UINT = 0x0004;
 pub const SWP_NOACTIVATE: UINT = 0x0010;
 
+// Window icon
+pub const WM_SETICON: UINT = 0x0080;
+pub const ICON_SMALL: WPARAM = 0;
+pub const ICON_BIG: WPARAM = 1;
+pub extern "user32" fn LoadIconW(hInstance: ?HINSTANCE, lpIconName: usize) callconv(.winapi) ?HICON;
+pub extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+pub extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn FlashWindow(hWnd: HWND, bInvert: BOOL) callconv(.winapi) BOOL;
+pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
+pub extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
+
+// Extra virtual keys and messages used by text editing
+pub const VK_PRIOR: u32 = 0x21;
+pub const VK_NEXT: u32 = 0x22;
+pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+pub const WM_IME_COMPOSITION: UINT = 0x010F;
+pub const WM_RBUTTONDBLCLK: UINT = 0x0206;
+
+// Clipboard (CF_UNICODETEXT)
+pub const CF_UNICODETEXT: UINT = 13;
+pub const GMEM_MOVEABLE: UINT = 0x0002;
+pub extern "user32" fn OpenClipboard(hWndNewOwner: ?HWND) callconv(.winapi) BOOL;
+pub extern "user32" fn CloseClipboard() callconv(.winapi) BOOL;
+pub extern "user32" fn EmptyClipboard() callconv(.winapi) BOOL;
+pub extern "user32" fn GetClipboardData(uFormat: UINT) callconv(.winapi) ?HANDLE;
+pub extern "user32" fn SetClipboardData(uFormat: UINT, hMem: ?HANDLE) callconv(.winapi) ?HANDLE;
+pub extern "user32" fn IsClipboardFormatAvailable(format: UINT) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn GlobalLock(hMem: HANDLE) callconv(.winapi) ?*anyopaque;
+pub extern "kernel32" fn GlobalUnlock(hMem: HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GlobalFree(hMem: HANDLE) callconv(.winapi) ?HANDLE;
+pub extern "kernel32" fn GlobalSize(hMem: HANDLE) callconv(.winapi) usize;
+
+// IME (imm32): place the composition/candidate windows at the text caret
+pub const HIMC = *opaque {};
+pub const CFS_POINT: DWORD = 0x0002;
+pub const CFS_FORCE_POSITION: DWORD = 0x0020;
+pub const CFS_EXCLUDE: DWORD = 0x0080;
+pub const COMPOSITIONFORM = extern struct {
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+};
+pub const CANDIDATEFORM = extern struct {
+    dwIndex: DWORD = 0,
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
+pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?HIMC;
+pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi) BOOL;
+pub extern "imm32" fn ImmSetCompositionWindow(hIMC: HIMC, lpCompForm: *const COMPOSITIONFORM) callconv(.winapi) BOOL;
+pub extern "imm32" fn ImmSetCandidateWindow(hIMC: HIMC, lpCandidate: *const CANDIDATEFORM) callconv(.winapi) BOOL;
+
+// Shell: open URLs / files with the default handler
+pub extern "shell32" fn ShellExecuteW(hwnd: ?HWND, lpOperation: ?[*:0]const u16, lpFile: [*:0]const u16, lpParameters: ?[*:0]const u16, lpDirectory: ?[*:0]const u16, nShowCmd: i32) callconv(.winapi) isize;
+pub const SW_SHOWNORMAL: i32 = 1;
+
 pub inline fn getXParam(lp: LPARAM) i32 {
     const bits: u32 = @truncate(@as(usize, @bitCast(lp)));
     return @as(i16, @bitCast(@as(u16, @truncate(bits))));

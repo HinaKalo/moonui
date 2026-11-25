@@ -6,6 +6,7 @@ const win32 = @import("win32/win32.zig");
 const renderer_mod = @import("renderer.zig");
 const ui = @import("ui.zig");
 const theme_mod = @import("theme.zig");
+const math = @import("math.zig");
 
 pub const AppOptions = struct {
     title: []const u8 = "MoonWin Native",
@@ -16,9 +17,50 @@ pub const AppOptions = struct {
     theme: theme_mod.Theme = theme_mod.presets.midnight,
     vsync: bool = true,
     capture_path: ?[]const u8 = null,
+    /// Frames rendered before a headless capture (layout/scroll settling).
+    capture_frames: u8 = 4,
     /// Optional callback invoked at the start of every frame (e.g. `mooncore.os.drain`).
     on_frame_start: ?*const fn () void = null,
+    /// UI font family and DirectWrite fallback locale.
+    font_family: []const u8 = renderer_mod.Renderer.default_font_family,
+    font_locale: []const u8 = renderer_mod.Renderer.default_font_locale,
+    /// Icon resource id compiled into the executable (.rc), if any.
+    icon_resource: ?u16 = null,
+    /// Called when the user closes the window; return false to keep it open
+    /// (e.g. minimize to tray instead). null = always close.
+    on_close: ?*const fn () bool = null,
 };
+
+/// The application window (null outside `run`).
+pub fn window() ?win32.HWND {
+    return g_hwnd;
+}
+
+/// Brings the window to the front (restoring it when minimized).
+pub fn activate() void {
+    const h = g_hwnd orelse return;
+    if (win32.IsIconic(h) != 0) _ = win32.ShowWindow(h, 9); // SW_RESTORE
+    _ = win32.ShowWindow(h, win32.SW_SHOW);
+    _ = win32.SetForegroundWindow(h);
+}
+
+/// True when the window is the foreground window.
+pub fn isForeground() bool {
+    const h = g_hwnd orelse return false;
+    return win32.GetForegroundWindow() == h;
+}
+
+/// Flashes the taskbar button (new message while in the background).
+pub fn flash() void {
+    const h = g_hwnd orelse return;
+    _ = win32.FlashWindow(h, 1);
+}
+
+pub fn setTitle(title: []const u8) void {
+    const h = g_hwnd orelse return;
+    var buf: [256]u16 = undefined;
+    _ = win32.SetWindowTextW(h, win32.utf8ToUtf16Z(&buf, title).ptr);
+}
 
 const WM_WAKE = win32.WM_APP + 1;
 
@@ -38,7 +80,35 @@ const WindowState = struct {
     cursor_hand: ?win32.HCURSOR = null,
     cursor_ibeam: ?win32.HCURSOR = null,
     tracking_leave: bool = false,
+    on_close: ?*const fn () bool = null,
+    last_ime: ?math.Rect = null,
 };
+
+/// Moves the IME composition / candidate windows next to the focused caret.
+fn placeImeWindow(hwnd: win32.HWND, ws: *WindowState, caret: ?math.Rect) void {
+    const r = caret orelse {
+        ws.last_ime = null;
+        return;
+    };
+    if (ws.last_ime) |prev| {
+        if (@abs(prev.min.x - r.min.x) < 0.5 and @abs(prev.min.y - r.min.y) < 0.5) return;
+    }
+    ws.last_ime = r;
+    const himc = win32.ImmGetContext(hwnd) orelse return;
+    defer _ = win32.ImmReleaseContext(hwnd, himc);
+    const scale = ws.dpi / 96.0;
+    const x: i32 = @intFromFloat(@round(r.min.x * scale));
+    const y: i32 = @intFromFloat(@round(r.min.y * scale));
+    const bottom: i32 = @intFromFloat(@round(r.max.y * scale));
+    const comp: win32.COMPOSITIONFORM = .{ .dwStyle = win32.CFS_FORCE_POSITION, .ptCurrentPos = .{ .x = x, .y = y } };
+    _ = win32.ImmSetCompositionWindow(himc, &comp);
+    const cand: win32.CANDIDATEFORM = .{
+        .dwStyle = win32.CFS_EXCLUDE,
+        .ptCurrentPos = .{ .x = x, .y = bottom },
+        .rcArea = .{ .left = x, .top = y, .right = x + 2, .bottom = bottom },
+    };
+    _ = win32.ImmSetCandidateWindow(himc, &cand);
+}
 
 var g_hwnd: ?win32.HWND = null;
 
@@ -117,6 +187,12 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     }
 
     win32.setDarkTitleBar(hwnd, opts.theme.dark, opts.theme.palette.bg_subtle.colorref());
+    if (opts.icon_resource) |res| {
+        if (win32.LoadIconW(hinst, res)) |ic| {
+            _ = win32.SendMessageW(hwnd, win32.WM_SETICON, win32.ICON_BIG, @bitCast(@intFromPtr(ic)));
+            _ = win32.SendMessageW(hwnd, win32.WM_SETICON, win32.ICON_SMALL, @bitCast(@intFromPtr(ic)));
+        }
+    }
 
     var cr: win32.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     _ = win32.GetClientRect(hwnd, &cr);
@@ -125,6 +201,7 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
 
     var renderer = try renderer_mod.Renderer.init(allocator, hwnd, client_w, client_h, if (opts.capture_path != null) 96.0 else dpi);
     defer renderer.deinit();
+    renderer.setFont(opts.font_family, opts.font_locale);
 
     var ui_ctx = ui.UiContext.init(allocator, &renderer, opts.theme);
     defer ui_ctx.deinit();
@@ -140,6 +217,7 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
         .cursor_arrow = win32.LoadCursorW(null, win32.IDC_ARROW),
         .cursor_hand = win32.LoadCursorW(null, win32.IDC_HAND),
         .cursor_ibeam = win32.LoadCursorW(null, win32.IDC_IBEAM),
+        .on_close = opts.on_close,
     };
     _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, @intCast(@intFromPtr(&wstate)));
 
@@ -159,7 +237,8 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     if (opts.capture_path) |cap_path| {
         ui_ctx.theme.motion.enabled = false;
         var f: usize = 0;
-        while (f < 3) : (f += 1) {
+        while (f < @max(opts.capture_frames, 1)) : (f += 1) {
+            if (opts.on_frame_start) |cb| cb();
             ui_ctx.beginFrame(@as(f64, @floatFromInt(f)) * 0.016, 0.016);
             frame_fn(state_ptr);
             ui_ctx.endFrame();
@@ -216,6 +295,8 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
                 win32.setDarkTitleBar(hwnd, ui_ctx.theme.dark, ui_ctx.theme.palette.bg_subtle.colorref());
             }
 
+            placeImeWindow(hwnd, &wstate, ui_ctx.ime_caret);
+
             ui_ctx.stats.animating = ui_ctx.anim.isAnimating();
             renderer.render(ui_ctx.theme.palette.bg, &ui_ctx.main_dl, &ui_ctx.overlay_dl, opts.vsync);
             ui_ctx.stats.frames_presented += 1;
@@ -242,6 +323,11 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
             ws.running = false;
             win32.PostQuitMessage(0);
             return 0;
+        },
+        win32.WM_CLOSE => {
+            if (ws.on_close) |cb| {
+                if (!cb()) return 0;
+            }
         },
         win32.WM_ERASEBKGND => return 1,
         win32.WM_PAINT => {
@@ -308,6 +394,28 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
             ws.needs_render = true;
             return 0;
         },
+        win32.WM_LBUTTONDBLCLK => {
+            // Windows replaces the second WM_LBUTTONDOWN with this message.
+            _ = win32.SetCapture(hwnd);
+            ws.ui_ctx.input.mouse_pos = .{
+                .x = @as(f32, @floatFromInt(win32.getXParam(lp))) / scale,
+                .y = @as(f32, @floatFromInt(win32.getYParam(lp))) / scale,
+            };
+            ws.ui_ctx.input.mouse_down = true;
+            ws.ui_ctx.input.mouse_pressed = true;
+            ws.ui_ctx.input.mouse_double_clicked = true;
+            ws.needs_render = true;
+            return 0;
+        },
+        win32.WM_RBUTTONDOWN => {
+            ws.ui_ctx.input.mouse_pos = .{
+                .x = @as(f32, @floatFromInt(win32.getXParam(lp))) / scale,
+                .y = @as(f32, @floatFromInt(win32.getYParam(lp))) / scale,
+            };
+            ws.ui_ctx.input.mouse_right_pressed = true;
+            ws.needs_render = true;
+            return 0;
+        },
         win32.WM_LBUTTONUP => {
             _ = win32.ReleaseCapture();
             ws.ui_ctx.input.mouse_pos = .{
@@ -350,10 +458,19 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
                 win32.VK_HOME => ws.ui_ctx.input.key_home = true,
                 win32.VK_END => ws.ui_ctx.input.key_end = true,
                 win32.VK_TAB => ws.ui_ctx.input.key_tab = true,
+                win32.VK_PRIOR => ws.ui_ctx.input.key_page_up = true,
+                win32.VK_NEXT => ws.ui_ctx.input.key_page_down = true,
                 else => {},
             }
             ws.ui_ctx.input.ctrl_down = (win32.GetKeyState(@intCast(win32.VK_CONTROL)) & @as(i16, -32768)) != 0;
             ws.ui_ctx.input.shift_down = (win32.GetKeyState(@intCast(win32.VK_SHIFT)) & @as(i16, -32768)) != 0;
+            if (ws.ui_ctx.input.ctrl_down) switch (vk) {
+                'A' => ws.ui_ctx.input.shortcut_select_all = true,
+                'C' => ws.ui_ctx.input.shortcut_copy = true,
+                'X' => ws.ui_ctx.input.shortcut_cut = true,
+                'V' => ws.ui_ctx.input.shortcut_paste = true,
+                else => {},
+            };
             ws.needs_render = true;
             return 0;
         },
