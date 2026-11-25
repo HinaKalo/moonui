@@ -3,13 +3,7 @@
     .version = "0.1.0",
     .fingerprint = 0x59e0088b1345935a,
     .minimum_zig_version = "0.17.1",
-    .dependencies = .{
-        // Optional ecosystem SDK, only resolved when running `zig build chat`.
-        .moon_sdk = .{
-            .path = "../moon-sdk",
-            .lazy = true,
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -17,5 +11,6 @@
         "examples",
         "tools",
         "README.md",
+        "LICENSE",
     },
 }

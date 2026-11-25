@@ -58,31 +58,25 @@ pub fn build(b: *std.Build) void {
     run_gallery.addPassthruArgs();
     b.step("run", "Run the native Direct2D component gallery").dependOn(&run_gallery.step);
 
-    // ---- MoonChat IM demo (`zig build chat`, combines moonui + moon_sdk)
-    const chat_step = b.step("chat", "Run the MoonChat Direct2D IM demo (moonui + mooncore + moonchat)");
-    if (b.lazyDependency("moon_sdk", .{ .target = target, .optimize = optimize })) |sdk| {
-        const chat_exe = b.addExecutable(.{
-            .name = "moonui-chat",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/chat/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "moonui", .module = moonui },
-                    .{ .name = "mooncore", .module = sdk.module("mooncore") },
-                    .{ .name = "moonchat", .module = sdk.module("moonchat") },
-                },
-            }),
-        });
-        if (optimize != .debug and target.result.os.tag == .windows) {
-            chat_exe.subsystem = .windows;
-        }
-        const install_chat = b.addInstallArtifact(chat_exe, .{});
-        const run_chat = b.addRunArtifact(chat_exe);
-        run_chat.step.dependOn(&install_chat.step);
-        run_chat.addPassthruArgs();
-        chat_step.dependOn(&run_chat.step);
+    // ---- IM demo (`zig build chat`)
+    const chat_exe = b.addExecutable(.{
+        .name = "moonui-chat",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/chat/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "moonui", .module = moonui }},
+        }),
+    });
+    if (optimize != .debug and target.result.os.tag == .windows) {
+        chat_exe.subsystem = .windows;
     }
+    const install_chat = b.addInstallArtifact(chat_exe, .{});
+    b.default_step.dependOn(&install_chat.step);
+    const run_chat = b.addRunArtifact(chat_exe);
+    run_chat.step.dependOn(&install_chat.step);
+    run_chat.addPassthruArgs();
+    b.step("chat", "Run the Direct2D IM demo").dependOn(&run_chat.step);
 
     // ---- One-command project scaffolder (`zig build new -- <dir> [--name app]`)
     const scaffolder = b.addExecutable(.{

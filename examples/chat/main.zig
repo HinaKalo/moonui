@@ -1,12 +1,13 @@
-//! Moon Ecosystem IM Demo — combines `moonui` (pure Direct2D + DirectComposition)
-//! with `mooncore` (OS thread pool + UI dispatcher + crypto) and `moonchat` (LumenIM SDK).
+//! MoonUI IM demo: conversation list, grouped message bubbles, quotes,
+//! delivery status and a growing composer, all drawn with Direct2D.
+//! A background thread simulates the server acknowledging each sent message
+//! and wakes the UI loop with `ui.wake()`.
 const std = @import("std");
 const ui = @import("moonui");
-const core = @import("mooncore");
-const moonchat = @import("moonchat");
+
+extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 
 const ChatMsg = struct {
-    id: [32]u8,
     own: bool,
     author: []const u8,
     text_buf: [256]u8 = undefined,
@@ -18,7 +19,6 @@ const ChatMsg = struct {
 
     fn init(own: bool, author: []const u8, txt: []const u8, time: []const u8, qa: ?[]const u8, qt: ?[]const u8) ChatMsg {
         var m: ChatMsg = .{
-            .id = moonchat.newRequestId(),
             .own = own,
             .author = author,
             .time = time,
@@ -64,32 +64,47 @@ const State = struct {
     search: ui.TextBuffer(64) = .{},
     composer: ui.chat.Composer(512) = .{},
     theme_idx: usize = 0,
-    sdk_ready: bool = true,
+    acks: [16]Ack = @splat(.{}),
 };
 
-const ReplyJob = struct {
-    state: *State,
-    conv_idx: usize,
-    msg_idx: usize,
+/// A sent message waiting for its (simulated) server acknowledgement.
+/// Only `done` is shared with the worker thread.
+const Ack = struct {
+    active: bool = false,
+    conv_idx: usize = 0,
+    msg_idx: usize = 0,
+    done: std.atomic.Value(bool) = .init(false),
 };
 
-fn asyncAckWork(job: *ReplyJob) void {
-    // Simulate network RTT on Windows OS thread pool via mooncore.os.runAsync
-    core.os.sleepMs(260);
-    core.os.post(job, asyncAckDone);
+fn ackWorker(ack: *Ack) void {
+    Sleep(260); // simulated network round trip
+    ack.done.store(true, .release);
+    ui.wake(); // thread-safe: renders one more frame
 }
 
-fn asyncAckDone(job: *ReplyJob) void {
-    const s = job.state;
-    const conv = &s.convs[job.conv_idx];
-    if (job.msg_idx < conv.msg_count) {
-        conv.msgs[job.msg_idx].status = .read;
+fn startAck(s: *State, conv_idx: usize, msg_idx: usize) void {
+    for (&s.acks) |*a| {
+        if (a.active) continue;
+        a.* = .{ .active = true, .conv_idx = conv_idx, .msg_idx = msg_idx };
+        const t = std.Thread.spawn(.{}, ackWorker, .{a}) catch {
+            a.active = false;
+            s.convs[conv_idx].msgs[msg_idx].status = .failed;
+            return;
+        };
+        t.detach();
+        return;
     }
-    std.heap.page_allocator.destroy(job);
+    s.convs[conv_idx].msgs[msg_idx].status = .sent;
 }
 
-fn drainMoonCore() void {
-    _ = core.os.drain();
+/// Runs on the UI thread at the start of every frame.
+fn collectAcks(s: *State) void {
+    for (&s.acks) |*a| {
+        if (!a.active or !a.done.load(.acquire)) continue;
+        const conv = &s.convs[a.conv_idx];
+        if (a.msg_idx < conv.msg_count) conv.msgs[a.msg_idx].status = .read;
+        a.active = false;
+    }
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -115,39 +130,36 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Wire mooncore background dispatcher to moonui's event loop!
-    core.os.setWakeHandler(ui.wake);
-
     var state: State = .{ .theme_idx = theme_idx };
     seedData(&state);
 
     try ui.run(.{
-        .title = "MoonChat Native (moonui + mooncore + moonchat)",
+        .title = "MoonChat (moonui demo)",
         .width = 1280,
         .height = 820,
         .theme = ui.themes.all[theme_idx].*,
         .capture_path = capture,
-        .on_frame_start = drainMoonCore,
     }, &state, frame);
 }
 
 fn seedData(s: *State) void {
-    s.convs[0] = .{ .name = "Moon Ecosystem", .role = "4 members · Direct2D + moon-sdk", .time = "14:32", .unread = 0, .online = true };
+    s.convs[0] = .{ .name = "Moon Ecosystem", .role = "4 members · Direct2D + DirectWrite", .time = "14:32", .unread = 0, .online = true };
     s.convs[0].push(ChatMsg.init(false, "Grace Hopper", "纯 Zig 原生 Direct2D + DirectComposition 皮肤已经跑通了！零 ImGui 依赖，空闲 CPU 占用 0%。", "14:28", null, null));
-    s.convs[0].push(ChatMsg.init(false, "Alan Turing", "而且 moon-sdk（mooncore + moonchat）也彻底解耦成独立包了，WinHTTP / DPAPI / SQLite / WebSocket 全套可用。", "14:30", "Grace Hopper", "纯 Zig 原生 Direct2D + DirectComposition 皮肤已经跑通了！"));
-    s.convs[0].push(ChatMsg.init(true, "Me", "太棒了！其他项目只要一条 zig fetch --save 就能同时组合 moonui 和 moon_sdk。", "14:32", null, null));
+    s.convs[0].push(ChatMsg.init(false, "Alan Turing", "长聊天记录也不卡：DirectWrite 排版跨帧缓存，屏幕外的消息直接剔除。", "14:30", "Grace Hopper", "纯 Zig 原生 Direct2D + DirectComposition 皮肤已经跑通了！"));
+    s.convs[0].push(ChatMsg.init(true, "Me", "太棒了！其他项目只要一条 zig fetch --save 就能用上 moonui。", "14:32", null, null));
 
     s.convs[1] = .{ .name = "Ada Lovelace", .role = "Online · Graphics Engineer", .time = "13:15", .unread = 2, .online = true };
     s.convs[1].push(ChatMsg.init(false, "Ada Lovelace", "DirectWrite 的中文字体回退（Segoe UI + 微软雅黑）在 150% DPI 下非常锐利。", "13:15", null, null));
 
     s.convs[2] = .{ .name = "Design System", .role = "Midnight · Daylight · Ember · Aurora", .time = "Yesterday", .unread = 0, .online = false };
-    s.convs[2].push(ChatMsg.init(false, "Margaret H.", "四套内置主题色板与 56 个矢量图标已全部 1:1 对齐。", "Yesterday", null, null));
+    s.convs[2].push(ChatMsg.init(false, "Margaret H.", "四套内置主题色板与 58 个矢量图标已全部对齐。", "Yesterday", null, null));
 
     s.convs[3] = .{ .name = "Build Bot", .role = "CI / zig build test", .time = "Tue", .unread = 1, .online = true };
-    s.convs[3].push(ChatMsg.init(false, "Build Bot", "mooncore (7/7) + moonchat + moonui (6/6) 全部测试通过。", "Tue", null, null));
+    s.convs[3].push(ChatMsg.init(false, "Build Bot", "zig build test 全部通过。", "Tue", null, null));
 }
 
 fn frame(s: *State) void {
+    collectAcks(s);
     const u = ui.ui.get();
     const p = ui.palette();
     const vp = u.viewport;
@@ -155,7 +167,7 @@ fn frame(s: *State) void {
 
     // ---- Left conversation sidebar
     ui.beginSidebar(.{ .width = sidebar_w, .padding = 12 });
-    ui.sidebarBrand("MoonChat", "moonui + moon-sdk", .layers);
+    ui.sidebarBrand("MoonChat", "moonui demo", .layers);
     _ = ui.searchBox("##conv_search", &s.search.buf, "Search conversations...");
     ui.space(.sm);
 
@@ -215,7 +227,7 @@ fn frame(s: *State) void {
     ui.endRow();
     ui.sameLine(.sm);
     ui.alignRight(110);
-    ui.badge("SDK Connected", .{ .tone = .success, .dot = true });
+    ui.badge("Connected", .{ .tone = .success, .dot = true });
     _ = u.popBox();
 
     // Middle Message Timeline
@@ -232,7 +244,7 @@ fn frame(s: *State) void {
         .spacing_y = 6,
     });
     ui.chat.timeDivider("Today");
-    ui.chat.systemNotice("End-to-end connected via mooncore (WinHTTP / CNG) + moonchat SDK");
+    ui.chat.systemNotice("Messages are acknowledged by a simulated server thread");
     ui.space(.xs);
     for (conv.msgs[0..conv.msg_count], 0..) |*m, mi| {
         const prev_same = mi > 0 and conv.msgs[mi - 1].own == m.own and std.mem.eql(u8, conv.msgs[mi - 1].author, m.author);
@@ -267,7 +279,7 @@ fn frame(s: *State) void {
     });
     const ev = s.composer.draw("##composer", .{ .hint = "Message (Enter to send, Shift+Enter for a new line)" });
     if (ev.attach) {
-        ui.toast(.info, "Attachment", .{ .description = "Attach files via mooncore / Win32 dialogs." });
+        ui.toast(.info, "Attachment", .{ .description = "Hook up a file picker or AppOptions.accept_files here." });
     }
     if (ev.send and s.composer.text().len > 0) {
         var msg = ChatMsg.init(true, "Me", s.composer.text(), "Now", null, null);
@@ -275,10 +287,7 @@ fn frame(s: *State) void {
         const msg_idx = conv.msg_count;
         conv.push(msg);
         s.composer.clear();
-        if (std.heap.page_allocator.create(ReplyJob)) |job| {
-            job.* = .{ .state = s, .conv_idx = s.selected, .msg_idx = msg_idx };
-            _ = core.os.runAsync(job, asyncAckWork);
-        } else |_| {}
+        startAck(s, s.selected, msg_idx);
     }
     _ = u.popBox();
 }
