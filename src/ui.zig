@@ -263,6 +263,11 @@ pub const UiContext = struct {
     scratch: [16384]u8 = undefined,
     scratch_pos: usize = 0,
 
+    /// Files dropped on the window since the last frame (owned; cleared in endFrame).
+    dropped: std.ArrayList([]u8) = .empty,
+    /// Where they were dropped (logical coordinates).
+    drop_pos: Vec2 = v2(0, 0),
+
     // Overlays
     toasts: [8]ToastItem = undefined,
     toast_count: usize = 0,
@@ -285,6 +290,19 @@ pub const UiContext = struct {
         self.overlay_dl.deinit();
         self.anim.deinit();
         self.scrolls.deinit();
+        self.clearDropped();
+        self.dropped.deinit(self.allocator);
+    }
+
+    fn clearDropped(self: *UiContext) void {
+        for (self.dropped.items) |p| self.allocator.free(p);
+        self.dropped.clearRetainingCapacity();
+    }
+
+    /// Records a dropped file path (UTF-8, copied).
+    pub fn addDropped(self: *UiContext, path: []const u8) void {
+        const copy = self.allocator.dupe(u8, path) catch return;
+        self.dropped.append(self.allocator, copy) catch self.allocator.free(copy);
     }
 
     /// Persistent scroll state for `id` (created on first use).
@@ -381,6 +399,7 @@ pub const UiContext = struct {
 
         self.drawTooltipOverlay();
         self.drawToastsOverlay();
+        self.clearDropped();
     }
 
     // ---- ID hashing ----

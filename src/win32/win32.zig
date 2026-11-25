@@ -277,6 +277,16 @@ pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi
 pub extern "imm32" fn ImmSetCompositionWindow(hIMC: HIMC, lpCompForm: *const COMPOSITIONFORM) callconv(.winapi) BOOL;
 pub extern "imm32" fn ImmSetCandidateWindow(hIMC: HIMC, lpCandidate: *const CANDIDATEFORM) callconv(.winapi) BOOL;
 
+// Files dropped from Explorer; clipboard bitmaps
+pub const WM_DROPFILES: UINT = 0x0233;
+pub const HDROP = *opaque {};
+pub extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryFileW(hDrop: HDROP, iFile: UINT, lpszFile: ?[*]u16, cch: UINT) callconv(.winapi) UINT;
+pub extern "shell32" fn DragQueryPoint(hDrop: HDROP, ppt: *POINT) callconv(.winapi) BOOL;
+pub extern "shell32" fn DragFinish(hDrop: HDROP) callconv(.winapi) void;
+pub const CF_DIB: UINT = 8;
+pub extern "user32" fn RegisterClipboardFormatW(lpszFormat: [*:0]const u16) callconv(.winapi) UINT;
+
 // Shell: open URLs / files with the default handler
 pub extern "shell32" fn ShellExecuteW(hwnd: ?HWND, lpOperation: ?[*:0]const u16, lpFile: [*:0]const u16, lpParameters: ?[*:0]const u16, lpDirectory: ?[*:0]const u16, nShowCmd: i32) callconv(.winapi) isize;
 pub const SW_SHOWNORMAL: i32 = 1;

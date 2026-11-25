@@ -16,6 +16,7 @@ pub const chat = @import("chat.zig");
 pub const app = @import("app.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const textedit = @import("textedit.zig");
+pub const image = @import("image.zig");
 
 // Core types
 pub const Vec2 = math.Vec2;
@@ -61,6 +62,36 @@ pub fn stats() Stats {
 
 pub fn fmt(comptime format: []const u8, args: anytype) [:0]const u8 {
     return ui.get().fmt(format, args);
+}
+
+/// Files dropped on the window this frame (needs `AppOptions.accept_files`).
+pub fn droppedFiles() []const []const u8 {
+    const items = ui.get().dropped.items;
+    return @ptrCast(items);
+}
+
+/// Where the files of this frame were dropped.
+pub fn dropPos() Vec2 {
+    return ui.get().drop_pos;
+}
+
+/// Uploads decoded pixels (`image.Pixels`) as a bitmap; 0 on failure. UI thread.
+pub fn createImage(px: *const image.Pixels) u32 {
+    return ui.get().renderer.createImage(px.w, px.h, px.data);
+}
+
+pub fn releaseImage(id: u32) void {
+    if (ui.ctx) |u| u.renderer.releaseImage(id);
+}
+
+/// Draws an image (from `createImage`) stretched to `r`.
+pub fn imageAt(r: Rect, id: u32, rounding: f32) void {
+    ui.get().dl().image(r, id, rounding, 1.0);
+}
+
+/// Device pixels per DIP (decode images at `size * pixelScale()` for sharp output).
+pub fn pixelScale() f32 {
+    return ui.get().renderer.pixelScale();
 }
 
 /// One-line text shortened with "…" to fit `max_w` (see UiContext.ellipsize).
@@ -189,4 +220,5 @@ test {
     _ = clipboard;
     _ = textedit;
     _ = renderer;
+    _ = image;
 }

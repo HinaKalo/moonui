@@ -30,6 +30,8 @@ pub const AppOptions = struct {
     /// Called when the user closes the window; return false to keep it open
     /// (e.g. minimize to tray instead). null = always close.
     on_close: ?*const fn () bool = null,
+    /// Accept files dragged from Explorer (`ui.droppedFiles()` in the next frame).
+    accept_files: bool = false,
 };
 
 /// The application window (null outside `run`).
@@ -223,6 +225,7 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     };
     _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, @intCast(@intFromPtr(&wstate)));
 
+    if (opts.accept_files) win32.DragAcceptFiles(hwnd, 1);
     if (opts.capture_path == null) {
         _ = win32.ShowWindow(hwnd, win32.SW_SHOW);
         _ = win32.UpdateWindow(hwnd);
@@ -541,6 +544,25 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
                 if (n > 0) ws.ui_ctx.input.pushUtf8(utf8[0..n]);
                 ws.needs_render = true;
             }
+            return 0;
+        },
+        win32.WM_DROPFILES => {
+            const drop: win32.HDROP = @ptrFromInt(@as(usize, @intCast(wp)));
+            defer win32.DragFinish(drop);
+            var pt: win32.POINT = .{ .x = 0, .y = 0 };
+            _ = win32.DragQueryPoint(drop, &pt);
+            ws.ui_ctx.drop_pos = .{ .x = @as(f32, @floatFromInt(pt.x)) / scale, .y = @as(f32, @floatFromInt(pt.y)) / scale };
+            const count = win32.DragQueryFileW(drop, 0xFFFFFFFF, null, 0);
+            var i: u32 = 0;
+            while (i < count and i < 64) : (i += 1) {
+                var wbuf: [1024]u16 = undefined;
+                const n = win32.DragQueryFileW(drop, i, &wbuf, wbuf.len);
+                if (n == 0 or n >= wbuf.len) continue;
+                var ubuf: [3072]u8 = undefined;
+                const len = std.unicode.utf16LeToUtf8(&ubuf, wbuf[0..n]) catch continue;
+                ws.ui_ctx.addDropped(ubuf[0..len]);
+            }
+            ws.needs_render = true;
             return 0;
         },
         WM_WAKE => {
