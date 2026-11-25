@@ -1,12 +1,16 @@
-//! MoonWin Native GUI — Pure Zig 0.17.1 + Win32 + Direct2D 1.1 + DirectComposition + DirectWrite.
-//! Zero C/C++ dependencies; replicates the MoonWin component library skin with pure native Windows APIs.
+//! MoonUI — Pure Zig 0.17.1 Native Windows UI Library (Direct2D 1.1 + DirectComposition + DirectWrite).
+//!
+//! Consumers:
+//!   zig fetch --save=moonui <path-or-git-url>
+//!   const moonui = b.dependency("moonui", .{ .target = target, .optimize = optimize });
+//!   exe.root_module.addImport("moonui", moonui.module("moonui"));
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const moonwin = b.addModule("moonwin", .{
+    const moonui = b.addModule("moonui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -26,18 +30,18 @@ pub fn build(b: *std.Build) void {
             "imm32",
         };
         for (libs) |lib| {
-            moonwin.linkSystemLibrary(lib, .{});
+            moonui.linkSystemLibrary(lib, .{});
         }
     }
 
-    // ---- Component Gallery executable
+    // ---- Component Gallery executable (`zig build run`)
     const gallery = b.addExecutable(.{
-        .name = "moonwin-native-gallery",
+        .name = "moonui-gallery",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/gallery/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "moonwin", .module = moonwin }},
+            .imports = &.{.{ .name = "moonui", .module = moonui }},
         }),
     });
     if (optimize != .debug and target.result.os.tag == .windows) {
@@ -49,12 +53,50 @@ pub fn build(b: *std.Build) void {
     const run_gallery = b.addRunArtifact(gallery);
     run_gallery.step.dependOn(&install_gallery.step);
     run_gallery.addPassthruArgs();
-    const run_step = b.step("run", "Run the native Direct2D component gallery");
-    run_step.dependOn(&run_gallery.step);
+    b.step("run", "Run the native Direct2D component gallery").dependOn(&run_gallery.step);
 
-    // ---- Unit tests
-    const tests = b.addTest(.{ .root_module = moonwin });
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_tests.step);
+    // ---- MoonChat IM demo (`zig build chat`, combines moonui + moon_sdk)
+    const chat_step = b.step("chat", "Run the MoonChat Direct2D IM demo (moonui + mooncore + moonchat)");
+    if (b.lazyDependency("moon_sdk", .{ .target = target, .optimize = optimize })) |sdk| {
+        const chat_exe = b.addExecutable(.{
+            .name = "moonui-chat",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/chat/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "moonui", .module = moonui },
+                    .{ .name = "mooncore", .module = sdk.module("mooncore") },
+                    .{ .name = "moonchat", .module = sdk.module("moonchat") },
+                },
+            }),
+        });
+        if (optimize != .debug and target.result.os.tag == .windows) {
+            chat_exe.subsystem = .windows;
+        }
+        const install_chat = b.addInstallArtifact(chat_exe, .{});
+        const run_chat = b.addRunArtifact(chat_exe);
+        run_chat.step.dependOn(&install_chat.step);
+        run_chat.addPassthruArgs();
+        chat_step.dependOn(&run_chat.step);
+    }
+
+    // ---- One-command project scaffolder (`zig build new -- <dir> [--name app]`)
+    const scaffolder = b.addExecutable(.{
+        .name = "moonui-new",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/new.zig"),
+            .target = b.graph.host,
+            .optimize = .debug,
+        }),
+    });
+    const run_new = b.addRunArtifact(scaffolder);
+    run_new.addArg("--moonui");
+    run_new.addDirectoryArg(b.path("."));
+    run_new.addPassthruArgs();
+    b.step("new", "Scaffold a new MoonUI app: zig build new -- <dir> [--name app]").dependOn(&run_new.step);
+
+    // ---- Unit tests (`zig build test`)
+    const tests = b.addTest(.{ .root_module = moonui });
+    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
 }

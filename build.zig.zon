@@ -1,14 +1,21 @@
 .{
-    .name = .moonwin_native,
+    .name = .moonui,
     .version = "0.1.0",
-    .fingerprint = 0x1e98f944a9729275,
+    .fingerprint = 0x59e0088b1345935a,
     .minimum_zig_version = "0.17.1",
-    .dependencies = .{},
+    .dependencies = .{
+        // Optional ecosystem SDK, only resolved when running `zig build chat`.
+        .moon_sdk = .{
+            .path = "../moon-sdk",
+            .lazy = true,
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "examples",
+        "tools",
         "README.md",
     },
 }

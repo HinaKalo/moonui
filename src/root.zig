@@ -12,6 +12,7 @@ pub const icons = @import("icons.zig");
 pub const ui = @import("ui.zig");
 pub const layout = @import("layout.zig");
 pub const widgets = @import("widgets.zig");
+pub const chat = @import("chat.zig");
 pub const app = @import("app.zig");
 
 // Core types
@@ -155,6 +156,7 @@ pub const beginDialog = widgets.beginDialog;
 pub const beginDialogActions = widgets.beginDialogActions;
 pub const endDialogActions = widgets.endDialogActions;
 pub const endDialog = widgets.endDialog;
+pub const searchBox = chat.searchBox;
 
 test {
     _ = color;

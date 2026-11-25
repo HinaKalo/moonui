@@ -1,7 +1,7 @@
 //! MoonWin Native Component Gallery (Direct2D 1.1 + DirectComposition + DirectWrite).
 //! Replicates every page, theme, and widget skin from moon-win-gui using pure native Win32 APIs.
 const std = @import("std");
-const mw = @import("moonwin");
+const mw = @import("moonui");
 
 const Page = enum { overview, components, forms, theming, performance };
 const Plan = enum { starter, pro, team };

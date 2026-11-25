@@ -16,6 +16,8 @@ pub const AppOptions = struct {
     theme: theme_mod.Theme = theme_mod.presets.midnight,
     vsync: bool = true,
     capture_path: ?[]const u8 = null,
+    /// Optional callback invoked at the start of every frame (e.g. `mooncore.os.drain`).
+    on_frame_start: ?*const fn () void = null,
 };
 
 const WM_WAKE = win32.WM_APP + 1;
@@ -204,6 +206,7 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
                 ui_ctx.stats.fps = if (ui_ctx.stats.fps == 0) inst_fps else ui_ctx.stats.fps * 0.9 + inst_fps * 0.1;
             }
 
+            if (opts.on_frame_start) |cb| cb();
             ui_ctx.beginFrame(now_s, dt_s);
             frame_fn(state_ptr);
             ui_ctx.endFrame();
