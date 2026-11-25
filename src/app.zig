@@ -34,6 +34,9 @@ pub const AppOptions = struct {
     on_close: ?*const fn () bool = null,
     /// Accept files dragged from Explorer (`ui.droppedFiles()` in the next frame).
     accept_files: bool = false,
+    /// Create the window without showing it (e.g. start-at-login into the
+    /// tray); `activate` shows it later.
+    start_hidden: bool = false,
 };
 
 /// The application window (null outside `run`).
@@ -262,7 +265,7 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, @intCast(@intFromPtr(&wstate)));
 
     if (opts.accept_files) win32.DragAcceptFiles(hwnd, 1);
-    if (opts.capture_path == null) {
+    if (opts.capture_path == null and !opts.start_hidden) {
         _ = win32.ShowWindow(hwnd, win32.SW_SHOW);
         _ = win32.UpdateWindow(hwnd);
     }
