@@ -794,3 +794,17 @@ test "lossy utf16 conversion" {
     try std.testing.expectEqual(@as(usize, 3), out.len);
     try std.testing.expectEqual(@as(u16, 0xFFFD), out[1]);
 }
+
+test "caret at the end of a DirectWrite layout" {
+    const factory = dwrite.createFactory() orelse return error.SkipZigTest;
+    const family = std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
+    const locale = std.unicode.utf8ToUtf16LeStringLiteral("zh-cn");
+    const fmt = factory.createTextFormat(family, 400, 14, locale) orelse return error.SkipZigTest;
+    const wide = std.unicode.utf8ToUtf16LeStringLiteral("232");
+    const layout = factory.createTextLayout(wide, fmt, 100000, 100000) orelse return error.SkipZigTest;
+    const mid = layout.hitTestTextPosition(1);
+    const end = layout.hitTestTextPosition(3);
+    try std.testing.expect(mid.x > 0);
+    try std.testing.expect(end.x > mid.x);
+    try std.testing.expect(end.height > 0);
+}

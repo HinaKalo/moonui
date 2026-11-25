@@ -224,6 +224,10 @@ pub const UiContext = struct {
     caret_pos: usize = 0,
     sel_anchor: usize = 0,
     caret_id: u64 = 0,
+    /// Hash of the focused editor's text when it last drew. A different text
+    /// next frame means the app replaced the buffer (draft restored, cleared
+    /// after sending): the caret then moves to the end.
+    caret_text_hash: u64 = 0,
     /// Horizontal (single-line) / vertical (multi-line) scroll of the focused editor.
     edit_scroll: f32 = 0,
     /// Caret rectangle of the focused editor this frame (IME window placement).

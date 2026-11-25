@@ -812,14 +812,7 @@ pub fn textField(lbl: [:0]const u8, buf: []u8, o: InputOptions) bool {
     }
 
     var focused = !o.disabled and u.focused_id == id;
-    if (focused and u.caret_id != id) {
-        u.caret_id = id;
-        u.caret_pos = len;
-        u.sel_anchor = len;
-        u.edit_scroll = 0;
-    }
-    if (u.caret_pos > len) u.caret_pos = len;
-    if (u.sel_anchor > len) u.sel_anchor = len;
+    syncCaret(u, id, focused, buf[0..len]);
 
     // Mouse: place caret, drag-select, double-click selects a word.
     const scroll_x = if (focused) u.edit_scroll else 0;
@@ -900,7 +893,26 @@ pub fn textField(lbl: [:0]const u8, buf: []u8, o: InputOptions) bool {
     }
     u.dl().popClip();
 
+    if (focused) u.caret_text_hash = textHash(buf[0..len]);
     return if (o.submit_on_enter) submitted else edited;
+}
+
+fn textHash(txt: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x63617265, txt);
+}
+
+/// Puts the caret at the end when an editor gains focus, or when the app
+/// replaced its text since it last drew (the caret would otherwise keep an
+/// offset into the old text, e.g. 0 after a cleared draft was restored).
+fn syncCaret(u: *ui.UiContext, id: u64, focused: bool, txt: []const u8) void {
+    if (focused and (u.caret_id != id or u.caret_text_hash != textHash(txt))) {
+        u.caret_id = id;
+        u.caret_pos = txt.len;
+        u.sel_anchor = txt.len;
+        u.edit_scroll = 0;
+    }
+    if (u.caret_pos > txt.len) u.caret_pos = txt.len;
+    if (u.sel_anchor > txt.len) u.sel_anchor = txt.len;
 }
 
 /// X offset (from the text origin) of byte offset `byte` as displayed (masked for passwords).
@@ -961,14 +973,7 @@ pub fn textArea(lbl: [:0]const u8, buf: []u8, o: TextAreaOptions) TextAreaResult
 
     var len = std.mem.sliceTo(buf, 0).len;
     var focused = !o.disabled and u.focused_id == id;
-    if (focused and u.caret_id != id) {
-        u.caret_id = id;
-        u.caret_pos = len;
-        u.sel_anchor = len;
-        u.edit_scroll = 0;
-    }
-    if (u.caret_pos > len) u.caret_pos = len;
-    if (u.sel_anchor > len) u.sel_anchor = len;
+    syncCaret(u, id, focused, buf[0..len]);
 
     var res: TextAreaResult = .{};
     if (focused) {
@@ -1084,6 +1089,7 @@ pub fn textArea(lbl: [:0]const u8, buf: []u8, o: TextAreaOptions) TextAreaResult
         u.anim.keepAlive(0.6);
     }
     u.dl().popClip();
+    if (focused) u.caret_text_hash = textHash(buf[0..len]);
     return res;
 }
 
