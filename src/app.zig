@@ -379,8 +379,22 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
         },
         win32.WM_MOUSELEAVE => {
             ws.tracking_leave = false;
-            ws.ui_ctx.input.mouse_pos = .{ .x = -1000, .y = -1000 };
+            // SetCapture on a button press also ends leave tracking and posts
+            // WM_MOUSELEAVE while the cursor is still over the window. Keep the
+            // position while the button is held (captured moves keep arriving);
+            // otherwise a text drag would snap the caret to the far left.
+            if (!ws.ui_ctx.input.mouse_down) ws.ui_ctx.input.mouse_pos = .{ .x = -1000, .y = -1000 };
             ws.needs_render = true;
+            return 0;
+        },
+        win32.WM_CAPTURECHANGED => {
+            // Capture taken away mid-press (Alt+Tab, a system dialog): no
+            // WM_LBUTTONUP will come, so end the press here.
+            if (lp != @as(isize, @bitCast(@intFromPtr(hwnd))) and ws.ui_ctx.input.mouse_down) {
+                ws.ui_ctx.input.mouse_down = false;
+                ws.ui_ctx.input.mouse_released = true;
+                ws.needs_render = true;
+            }
             return 0;
         },
         win32.WM_LBUTTONDOWN => {

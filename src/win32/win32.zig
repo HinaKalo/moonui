@@ -106,6 +106,7 @@ pub const WM_RBUTTONDOWN: UINT = 0x0204;
 pub const WM_RBUTTONUP: UINT = 0x0205;
 pub const WM_MOUSEWHEEL: UINT = 0x020A;
 pub const WM_MOUSELEAVE: UINT = 0x02A3;
+pub const WM_CAPTURECHANGED: UINT = 0x0215;
 pub const WM_DPICHANGED: UINT = 0x02E0;
 pub const WM_APP: UINT = 0x8000;
 
