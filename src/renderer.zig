@@ -36,6 +36,14 @@ const LayoutEntry = struct {
     last_frame: u64,
 };
 
+/// A bitmap uploaded with `Renderer.createImage`.
+const ImageEntry = struct {
+    bitmap: *d2d.ID2D1Bitmap,
+    brush: ?*d2d.ID2D1BitmapBrush = null,
+    w: u32,
+    h: u32,
+};
+
 /// Layouts unused for this many frames are released once the cache is large.
 const layout_ttl_frames: u64 = 240;
 const layout_soft_cap: usize = 3000;
@@ -141,6 +149,8 @@ pub const Renderer = struct {
     font_cache: std.AutoHashMap(FontKey, *dwrite.IDWriteTextFormat),
     layout_cache: std.AutoHashMap(LayoutKey, LayoutEntry),
     frame_index: u64 = 0,
+    images: std.AutoHashMap(u32, ImageEntry),
+    next_image: u32 = 1,
 
     /// UI font family and locale. The locale drives DirectWrite's fallback for
     /// scripts the family lacks ("zh-cn" picks Microsoft YaHei for Han text).
@@ -159,6 +169,7 @@ pub const Renderer = struct {
             .allocator = allocator,
             .font_cache = std.AutoHashMap(FontKey, *dwrite.IDWriteTextFormat).init(allocator),
             .layout_cache = std.AutoHashMap(LayoutKey, LayoutEntry).init(allocator),
+            .images = std.AutoHashMap(u32, ImageEntry).init(allocator),
             .pixel_w = @max(width, 1),
             .pixel_h = @max(height, 1),
             .dpi = dpi,
@@ -249,6 +260,9 @@ pub const Renderer = struct {
         self.clearTextCaches();
         self.font_cache.deinit();
         self.layout_cache.deinit();
+        var img_it = self.images.valueIterator();
+        while (img_it.next()) |e| releaseImageEntry(e);
+        self.images.deinit();
 
         if (self.dc) |dc| dc.setTarget(null);
         com.safeRelease(&self.target_bitmap);
@@ -303,6 +317,52 @@ pub const Renderer = struct {
             _ = sc.resizeBuffers(w, h);
         }
         self.bindBackBuffer() catch {};
+    }
+
+    /// Uploads premultiplied BGRA pixels (`w * 4` bytes per row, e.g. from
+    /// `image.decode`) as a bitmap; returns its id for `DrawList.image`, or 0.
+    /// UI thread only. Release with `releaseImage`.
+    pub fn createImage(self: *Renderer, w: u32, h: u32, pixels: []const u8) u32 {
+        const dc = self.dc orelse return 0;
+        if (w == 0 or h == 0 or pixels.len < @as(usize, w) * h * 4) return 0;
+        const bmp = dc.createBitmap(w, h, pixels.ptr, w * 4) orelse return 0;
+        var id = self.next_image;
+        while (id == 0 or self.images.contains(id)) id +%= 1;
+        self.next_image = id +% 1;
+        self.images.put(id, .{ .bitmap = bmp, .w = w, .h = h }) catch {
+            var b: ?*d2d.ID2D1Bitmap = bmp;
+            com.safeRelease(&b);
+            return 0;
+        };
+        return id;
+    }
+
+    pub fn releaseImage(self: *Renderer, id: u32) void {
+        if (self.images.fetchRemove(id)) |kv| {
+            var e = kv.value;
+            releaseImageEntry(&e);
+        }
+    }
+
+    /// Pixel size of an uploaded image.
+    pub fn imageSize(self: *const Renderer, id: u32) ?[2]u32 {
+        const e = self.images.get(id) orelse return null;
+        return .{ e.w, e.h };
+    }
+
+    pub fn imageCount(self: *const Renderer) usize {
+        return self.images.count();
+    }
+
+    fn releaseImageEntry(e: *ImageEntry) void {
+        com.safeRelease(&e.brush);
+        var b: ?*d2d.ID2D1Bitmap = e.bitmap;
+        com.safeRelease(&b);
+    }
+
+    /// Device pixels per DIP (1.0 at 96 DPI).
+    pub fn pixelScale(self: *const Renderer) f32 {
+        return self.dpi / 96.0;
     }
 
     pub fn logicalSize(self: *const Renderer) Vec2 {
@@ -561,10 +621,34 @@ pub const Renderer = struct {
                     const str = dl.text_buf.items[c.start .. c.start + c.len];
                     self.drawTextCmd(c.pos, c.max_w, c.color, c.style, str);
                 },
+                .image => |c| self.drawImageCmd(c.rect, c.id, c.rounding, c.opacity),
                 .push_clip => |r| dc.pushAxisAlignedClip(r.d2dRect()),
                 .pop_clip => dc.popAxisAlignedClip(),
             }
         }
+    }
+
+    fn drawImageCmd(self: *Renderer, r: Rect, id: u32, rounding: f32, opacity: f32) void {
+        const dc = self.dc.?;
+        const e = self.images.getPtr(id) orelse return;
+        if (rounding <= 0.1) {
+            dc.drawBitmap(e.bitmap, r.d2dRect(), opacity);
+            return;
+        }
+        // Rounded corners: fill the rounded rect with the bitmap as a brush.
+        if (e.brush == null) e.brush = dc.createBitmapBrush(e.bitmap);
+        const brush = e.brush orelse {
+            dc.drawBitmap(e.bitmap, r.d2dRect(), opacity);
+            return;
+        };
+        brush.setTransform(.{
+            .m11 = r.w() / @as(f32, @floatFromInt(e.w)),
+            .m22 = r.h() / @as(f32, @floatFromInt(e.h)),
+            .dx = r.min.x,
+            .dy = r.min.y,
+        });
+        brush.setOpacity(opacity);
+        dc.fillRoundedRectangle(r.d2dRounded(rounding), brush.asBrush());
     }
 
     fn drawArcGeometry(self: *Renderer, center: Vec2, radius: f32, a0: f32, a1: f32, col: Color, thickness: f32) void {

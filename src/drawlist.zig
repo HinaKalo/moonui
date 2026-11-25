@@ -36,6 +36,8 @@ pub const DrawCmd = union(enum) {
     polygon_filled: struct { start: u32, count: u32, color: Color },
     polygon_gradient: struct { start: u32, count: u32, y0: f32, y1: f32, from: Color, to: Color },
     text: struct { pos: Vec2, max_w: f32, color: Color, style: TextStyle, start: u32, len: u32 },
+    /// A bitmap from `Renderer.createImage`, stretched to `rect`.
+    image: struct { rect: Rect, id: u32, rounding: f32, opacity: f32 },
     push_clip: Rect,
     pop_clip: void,
 };
@@ -187,6 +189,13 @@ pub const DrawList = struct {
             .start = start,
             .len = @intCast(str.len),
         } });
+    }
+
+    /// Draws image `id` (see `Renderer.createImage`) stretched to `r`.
+    pub fn image(self: *DrawList, r: Rect, id: u32, rounding: f32, opacity: f32) void {
+        const a = opacity * self.alpha;
+        if (id == 0 or a <= 0.001 or r.w() <= 0 or r.h() <= 0) return;
+        self.pushCmd(.{ .image = .{ .rect = r, .id = id, .rounding = rounding, .opacity = @min(a, 1.0) } });
     }
 
     pub fn pushClip(self: *DrawList, r: Rect) void {

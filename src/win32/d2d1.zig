@@ -110,6 +110,42 @@ pub const ID2D1Bitmap1 = extern struct {
     vtbl: *const IUnknownVTable,
 };
 
+pub const D2D1_SIZE_U = extern struct { width: u32, height: u32 };
+
+pub const D2D1_BITMAP_PROPERTIES = extern struct {
+    pixelFormat: D2D1_PIXEL_FORMAT = .{},
+    dpiX: f32 = 96.0,
+    dpiY: f32 = 96.0,
+};
+
+pub const D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC: u32 = 5;
+
+/// A plain (drawable) bitmap from `ID2D1DeviceContext.createBitmap`.
+pub const ID2D1Bitmap = extern struct {
+    vtbl: *const IUnknownVTable,
+};
+
+pub const ID2D1BitmapBrush = extern struct {
+    vtbl: *const VTable,
+
+    pub const VTable = extern struct {
+        base: IUnknownVTable,
+        GetFactory: *const anyopaque, // 3
+        SetOpacity: *const fn (*ID2D1BitmapBrush, f32) callconv(.winapi) void, // 4
+        SetTransform: *const fn (*ID2D1BitmapBrush, *const D2D1_MATRIX_3X2_F) callconv(.winapi) void, // 5
+    };
+
+    pub fn setOpacity(self: *ID2D1BitmapBrush, opacity: f32) void {
+        self.vtbl.SetOpacity(self, opacity);
+    }
+    pub fn setTransform(self: *ID2D1BitmapBrush, m: D2D1_MATRIX_3X2_F) void {
+        self.vtbl.SetTransform(self, &m);
+    }
+    pub fn asBrush(self: *ID2D1BitmapBrush) *ID2D1Brush {
+        return @ptrCast(self);
+    }
+};
+
 pub const ID2D1Brush = extern struct {
     vtbl: *const IUnknownVTable,
 };
@@ -225,10 +261,10 @@ pub const ID2D1DeviceContext = extern struct {
         base: IUnknownVTable,
         GetFactory: *const anyopaque,
         // ID2D1RenderTarget (4..56)
-        CreateBitmap: *const anyopaque, // 4
+        CreateBitmap: *const fn (*ID2D1DeviceContext, D2D1_SIZE_U, ?*const anyopaque, u32, *const D2D1_BITMAP_PROPERTIES, *?*ID2D1Bitmap) callconv(.winapi) HRESULT, // 4
         CreateBitmapFromWicBitmap: *const anyopaque, // 5
         CreateSharedBitmap: *const anyopaque, // 6
-        CreateBitmapBrush: *const anyopaque, // 7
+        CreateBitmapBrush: *const fn (*ID2D1DeviceContext, *ID2D1Bitmap, ?*const anyopaque, ?*const anyopaque, *?*ID2D1BitmapBrush) callconv(.winapi) HRESULT, // 7
         CreateSolidColorBrush: *const fn (*ID2D1DeviceContext, *const D2D1_COLOR_F, ?*const anyopaque, *?*ID2D1SolidColorBrush) callconv(.winapi) HRESULT, // 8
         CreateGradientStopCollection: *const fn (*ID2D1DeviceContext, [*]const D2D1_GRADIENT_STOP, u32, u32, u32, *?*ID2D1GradientStopCollection) callconv(.winapi) HRESULT, // 9
         CreateLinearGradientBrush: *const fn (*ID2D1DeviceContext, *const D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, ?*const anyopaque, *ID2D1GradientStopCollection, *?*ID2D1LinearGradientBrush) callconv(.winapi) HRESULT, // 10
@@ -283,7 +319,28 @@ pub const ID2D1DeviceContext = extern struct {
         CreateBitmapFromDxgiSurface: *const fn (*ID2D1DeviceContext, *d3d.IDXGISurface, ?*const D2D1_BITMAP_PROPERTIES1, *?*ID2D1Bitmap1) callconv(.winapi) HRESULT, // 62
         _dc_63_73: [11]*const anyopaque,
         SetTarget: *const fn (*ID2D1DeviceContext, ?*ID2D1Bitmap1) callconv(.winapi) void, // 74
+        _dc_75_84: [10]*const anyopaque,
+        DrawBitmap1: *const fn (*ID2D1DeviceContext, *ID2D1Bitmap, ?*const D2D1_RECT_F, f32, u32, ?*const D2D1_RECT_F, ?*const anyopaque) callconv(.winapi) void, // 85
     };
+
+    /// A drawable premultiplied-BGRA bitmap from `pixels` (`pitch` bytes per row).
+    pub fn createBitmap(self: *ID2D1DeviceContext, w: u32, h: u32, pixels: [*]const u8, pitch: u32) ?*ID2D1Bitmap {
+        var out: ?*ID2D1Bitmap = null;
+        const props: D2D1_BITMAP_PROPERTIES = .{};
+        if (com.succeeded(self.vtbl.CreateBitmap(self, .{ .width = w, .height = h }, pixels, pitch, &props, &out))) return out;
+        return null;
+    }
+
+    pub fn createBitmapBrush(self: *ID2D1DeviceContext, bitmap: *ID2D1Bitmap) ?*ID2D1BitmapBrush {
+        var out: ?*ID2D1BitmapBrush = null;
+        if (com.succeeded(self.vtbl.CreateBitmapBrush(self, bitmap, null, null, &out))) return out;
+        return null;
+    }
+
+    /// Draws `bitmap` into `dest` with high-quality cubic filtering.
+    pub fn drawBitmap(self: *ID2D1DeviceContext, bitmap: *ID2D1Bitmap, dest: D2D1_RECT_F, opacity: f32) void {
+        self.vtbl.DrawBitmap1(self, bitmap, &dest, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, null, null);
+    }
 
     pub fn createSolidColorBrush(self: *ID2D1DeviceContext, color: D2D1_COLOR_F) ?*ID2D1SolidColorBrush {
         var out: ?*ID2D1SolidColorBrush = null;
