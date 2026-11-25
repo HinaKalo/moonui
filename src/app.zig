@@ -7,6 +7,7 @@ const renderer_mod = @import("renderer.zig");
 const ui = @import("ui.zig");
 const theme_mod = @import("theme.zig");
 const math = @import("math.zig");
+const trace = @import("trace.zig");
 
 pub const AppOptions = struct {
     title: []const u8 = "MoonWin Native",
@@ -123,6 +124,7 @@ pub fn quit() void {
 }
 
 pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(state_ptr)) void) !void {
+    trace.init();
     _ = com.CoInitializeEx(null, com.COINIT_APARTMENTTHREADED | com.COINIT_DISABLE_OLE1DDE);
     defer com.CoUninitialize();
 
@@ -287,7 +289,9 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
 
             if (opts.on_frame_start) |cb| cb();
             ui_ctx.beginFrame(now_s, dt_s);
+            const before = if (trace.enabled()) traceSnapshot(&ui_ctx) else undefined;
             frame_fn(state_ptr);
+            if (trace.enabled()) traceFrame(&ui_ctx, before);
             ui_ctx.endFrame();
 
             if (ui_ctx.theme_changed) {
@@ -312,11 +316,42 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     }
 }
 
+const TraceSnap = struct { caret: usize, anchor: usize, focused: u64, caret_id: u64 };
+
+fn traceSnapshot(u: *const ui.UiContext) TraceSnap {
+    return .{ .caret = u.caret_pos, .anchor = u.sel_anchor, .focused = u.focused_id, .caret_id = u.caret_id };
+}
+
+/// Logs a frame whose caret, selection or focus changed, with the input it saw.
+fn traceFrame(u: *const ui.UiContext, b: TraceSnap) void {
+    const a = traceSnapshot(u);
+    if (a.caret == b.caret and a.anchor == b.anchor and a.focused == b.focused and a.caret_id == b.caret_id) return;
+    const in = &u.input;
+    trace.log("frame caret {d}->{d} anchor {d}->{d} focused {x}->{x} caret_id {x}->{x} | mouse ({d:.0},{d:.0}) down={} pressed={} released={} dbl={} active={x} hot={x} typed={d} keys L{} R{} U{} D{} home{} end{} bs{} enter{}", .{
+        b.caret,          a.caret,          b.anchor,          a.anchor,         b.focused,           a.focused,  b.caret_id,      a.caret_id,
+        in.mouse_pos.x,   in.mouse_pos.y,   in.mouse_down,     in.mouse_pressed, in.mouse_released,   in.mouse_double_clicked, u.active_id, u.hot_id,
+        in.typed().len,   in.key_left,      in.key_right,      in.key_up,        in.key_down,         in.key_home, in.key_end,     in.key_backspace,
+        in.key_enter,
+    });
+}
+
 fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM) callconv(.winapi) win32.LRESULT {
     const raw = win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA);
     if (raw == 0) return win32.DefWindowProcW(hwnd, msg, wp, lp);
     const ws: *WindowState = @ptrFromInt(@as(usize, @intCast(raw)));
     const scale = ws.dpi / 96.0;
+    if (trace.enabled()) {
+        if (trace.messageName(msg)) |name| {
+            const lpu: usize = @bitCast(lp);
+            const x: i16 = @bitCast(@as(u16, @truncate(lpu)));
+            const y: i16 = @bitCast(@as(u16, @truncate(lpu >> 16)));
+            trace.log("{s} wp={x} lp=({d},{d}) lp={x} | down={} pos=({d:.0},{d:.0}) tracking={} capture={}", .{
+                name,                         wp,                           x, y, lpu,
+                ws.ui_ctx.input.mouse_down,   ws.ui_ctx.input.mouse_pos.x,  ws.ui_ctx.input.mouse_pos.y,
+                ws.tracking_leave,            win32.GetCapture() == hwnd,
+            });
+        }
+    }
 
     switch (msg) {
         win32.WM_DESTROY => {

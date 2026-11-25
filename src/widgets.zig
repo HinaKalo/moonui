@@ -905,7 +905,11 @@ fn textHash(txt: []const u8) u64 {
 /// replaced its text since it last drew (the caret would otherwise keep an
 /// offset into the old text, e.g. 0 after a cleared draft was restored).
 fn syncCaret(u: *ui.UiContext, id: u64, focused: bool, txt: []const u8) void {
-    if (focused and (u.caret_id != id or u.caret_text_hash != textHash(txt))) {
+    // The caret is shared by all editors: an unfocused one must not touch
+    // it (clamping it to an empty search box reset the composer's caret to 0
+    // every frame).
+    if (!focused) return;
+    if (u.caret_id != id or u.caret_text_hash != textHash(txt)) {
         u.caret_id = id;
         u.caret_pos = txt.len;
         u.sel_anchor = txt.len;

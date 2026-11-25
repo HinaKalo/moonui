@@ -212,6 +212,7 @@ pub extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.wina
 pub extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: usize) callconv(.winapi) ?HCURSOR;
 pub extern "user32" fn SetCursor(hCursor: ?HCURSOR) callconv(.winapi) ?HCURSOR;
 pub extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
+pub extern "user32" fn GetCapture() callconv(.winapi) ?HWND;
 pub extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 pub extern "user32" fn TrackMouseEvent(lpEventTrack: *TRACKMOUSEEVENT) callconv(.winapi) BOOL;
 pub extern "user32" fn ValidateRect(hWnd: HWND, lpRect: ?*const RECT) callconv(.winapi) BOOL;
