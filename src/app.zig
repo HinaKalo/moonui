@@ -8,6 +8,8 @@ const ui = @import("ui.zig");
 const theme_mod = @import("theme.zig");
 const math = @import("math.zig");
 const trace = @import("trace.zig");
+const shell = @import("shell.zig");
+const toast = @import("toast.zig");
 
 pub const AppOptions = struct {
     title: []const u8 = "MoonWin Native",
@@ -51,11 +53,39 @@ pub fn isForeground() bool {
     return win32.GetForegroundWindow() == h;
 }
 
-/// Flashes the taskbar button (new message while in the background).
+/// Flashes the taskbar button until the window comes to the foreground
+/// (new message while in the background). No-op while hidden.
 pub fn flash() void {
     const h = g_hwnd orelse return;
-    _ = win32.FlashWindow(h, 1);
+    shell.flash(h);
 }
+
+pub fn stopFlash() void {
+    const h = g_hwnd orelse return;
+    shell.stopFlash(h);
+}
+
+/// Hides the window (e.g. to the tray); `activate` brings it back.
+pub fn hide() void {
+    const h = g_hwnd orelse return;
+    _ = win32.ShowWindow(h, win32.SW_HIDE);
+}
+
+pub fn isVisible() bool {
+    const h = g_hwnd orelse return false;
+    return IsWindowVisible(h) != 0;
+}
+extern "user32" fn IsWindowVisible(hwnd: win32.HWND) callconv(.winapi) win32.BOOL;
+extern "user32" fn RegisterWindowMessageW(name: [*:0]const u16) callconv(.winapi) win32.UINT;
+
+/// Taskbar overlay badge (null clears it). The icon must stay alive until
+/// replaced; it is re-applied when Explorer recreates the taskbar button.
+pub fn setOverlay(icon: ?win32.HICON, description: []const u8) void {
+    const h = g_hwnd orelse return;
+    shell.setOverlay(h, icon, description);
+}
+
+var g_taskbar_button_created: win32.UINT = 0;
 
 pub fn setTitle(title: []const u8) void {
     const h = g_hwnd orelse return;
@@ -127,6 +157,12 @@ pub fn run(opts: AppOptions, state_ptr: anytype, comptime frame_fn: fn (@TypeOf(
     trace.init();
     _ = com.CoInitializeEx(null, com.COINIT_APARTMENTTHREADED | com.COINIT_DISABLE_OLE1DDE);
     defer com.CoUninitialize();
+    // COM objects cached by the shell helpers die with the apartment.
+    defer {
+        toast.shutdown();
+        shell.releaseTaskbar();
+    }
+    g_taskbar_button_created = RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
 
     _ = win32.SetProcessDpiAwarenessContext(win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
@@ -547,7 +583,7 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wp: win32.WPARAM, lp: win32.LPARAM
             ws.needs_render = true;
             return 0;
         },
-        else => {},
+        else => if (msg == g_taskbar_button_created and msg != 0) shell.reapplyOverlay(hwnd),
     }
     return win32.DefWindowProcW(hwnd, msg, wp, lp);
 }

@@ -16,6 +16,8 @@ pub const chat = @import("chat.zig");
 pub const app = @import("app.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const textedit = @import("textedit.zig");
+pub const shell = @import("shell.zig");
+pub const notification = @import("toast.zig");
 
 // Core types
 pub const Vec2 = math.Vec2;
@@ -38,6 +40,10 @@ pub const window = app.window;
 pub const activate = app.activate;
 pub const isForeground = app.isForeground;
 pub const flash = app.flash;
+pub const stopFlash = app.stopFlash;
+pub const hide = app.hide;
+pub const isVisible = app.isVisible;
+pub const setOverlay = app.setOverlay;
 pub const setTitle = app.setTitle;
 pub const ScrollState = ui.ScrollState;
 
@@ -189,4 +195,6 @@ test {
     _ = clipboard;
     _ = textedit;
     _ = renderer;
+    _ = shell;
+    _ = notification;
 }
