@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
             "ole32",
             "imm32",
             "shell32",
+            "advapi32",
             "kernel32",
         };
         for (libs) |lib| {
